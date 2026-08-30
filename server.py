@@ -15,8 +15,8 @@ Run:  python3 server.py
 Serves on 0.0.0.0:8092, protected by HTTP Basic Auth.
 """
 import base64
-import datetime
 import html
+import json
 import os
 import re
 import unicodedata
@@ -261,7 +261,7 @@ def load_recipe(slug):
     return parsed
 
 
-def save_recipe(title, description, servings, prep_time, cook_time, ingredients, steps, notes):
+def save_recipe(title, summary, steps):
     slug = slugify(title)
     path = os.path.join(RECIPES_DIR, slug + ".md")
     suffix = 2
@@ -270,29 +270,12 @@ def save_recipe(title, description, servings, prep_time, cook_time, ingredients,
         suffix += 1
 
     parts = [f"# {title}\n"]
-    if description.strip():
-        parts.append(f"\n{description.strip()}\n")
-    meta_bits = []
-    if servings.strip():
-        meta_bits.append(f"**Servings:** {servings.strip()}")
-    if prep_time.strip():
-        meta_bits.append(f"**Prep Time:** {prep_time.strip()}")
-    if cook_time.strip():
-        meta_bits.append(f"**Cook Time:** {cook_time.strip()}")
-    if meta_bits:
-        parts.append(f"\n{' | '.join(meta_bits)}\n")
-
-    ingredient_lines = [l.strip() for l in ingredients.splitlines() if l.strip()]
-    if ingredient_lines:
-        parts.append("\n## Ingredients\n\n" + "\n".join(f"- {l}" for l in ingredient_lines) + "\n")
+    if summary.strip():
+        parts.append(f"\n{summary.strip()}\n")
 
     step_lines = [l.strip() for l in steps.splitlines() if l.strip()]
     if step_lines:
         parts.append("\n## Instructions\n\n" + "\n".join(f"{i}. {l}" for i, l in enumerate(step_lines, 1)) + "\n")
-
-    note_lines = [l.strip() for l in notes.splitlines() if l.strip()]
-    if note_lines:
-        parts.append("\n## Notes\n\n" + "\n".join(f"- {l}" for l in note_lines) + "\n")
 
     os.makedirs(RECIPES_DIR, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -368,8 +351,6 @@ header.top a.back:hover { color: var(--text); }
 
 form.stack { display: flex; flex-direction: column; gap: 0.9rem; max-width: 560px; margin-top: 1.2rem; }
 form.stack label { font-size: 0.82rem; color: var(--text-dim); display: flex; flex-direction: column; gap: 0.35rem; }
-form.stack .row3 { display: flex; gap: 0.7rem; }
-form.stack .row3 label { flex: 1; }
 input, textarea {
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
   color: var(--text); padding: 0.55rem 0.65rem; font-size: 0.95rem; font-family: inherit;
@@ -378,29 +359,35 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 textarea { resize: vertical; min-height: 6em; }
 .hint { color: var(--text-dim); font-size: 0.78rem; }
 
-/* --- Step viewer: full-black, big-thumb navigation --------------------- */
-.step-page { background: #000000; min-height: 100vh; display: flex; flex-direction: column; }
+/* --- Step viewer: full-black flashcard deck, swipe/arrow between cards -- */
+.step-page {
+  background: #000000; height: 100vh; height: 100dvh;
+  display: flex; flex-direction: column; overflow: hidden;
+}
 .step-top {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 1rem 1.25rem; gap: 1rem;
+  padding: 1rem 1.25rem; gap: 1rem; flex: none;
 }
 .step-top a.back { color: var(--text-dim); font-size: 0.85rem; }
-.step-top .recipe-name { color: var(--text-dim); font-size: 0.85rem; text-align: right; }
-.step-progress { padding: 0 1.25rem; color: var(--accent); font-family: 'Rajdhani', sans-serif; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.85rem; }
-.step-bar { height: 3px; background: var(--surface-2); margin: 0.6rem 1.25rem 0; border-radius: 2px; overflow: hidden; }
-.step-bar-fill { height: 100%; background: var(--accent); }
-.step-body {
-  flex: 1; display: flex; align-items: center; justify-content: center;
-  padding: 1.5rem 1.5rem 2rem; text-align: center;
+.step-progress { padding: 0 1.25rem; color: var(--accent); font-family: 'Rajdhani', sans-serif; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.85rem; flex: none; }
+.step-bar { height: 3px; background: var(--surface-2); margin: 0.6rem 1.25rem 0; border-radius: 2px; overflow: hidden; flex: none; }
+.step-bar-fill { height: 100%; background: var(--accent); transition: width 0.28s ease; }
+.deck-viewport { flex: 1; overflow: hidden; min-height: 0; }
+.deck-track { display: flex; height: 100%; will-change: transform; }
+.card {
+  flex: 0 0 100%; height: 100%; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center;
+  padding: 1.5rem 1.5rem 2rem; text-align: center; overflow-y: auto;
 }
-.step-text { font-size: 1.5rem; line-height: 1.5; max-width: 640px; }
-.step-text .step-label { display: block; color: var(--accent); font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.6rem; font-family: 'Rajdhani', sans-serif; font-weight: 700; }
-.step-nav { display: flex; gap: 0.8rem; padding: 0 1.25rem 1.5rem; }
+.card-text { font-size: 1.5rem; line-height: 1.5; max-width: 640px; }
+.card-text .step-label { display: block; color: var(--accent); font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.6rem; font-family: 'Rajdhani', sans-serif; font-weight: 700; }
+.step-nav { display: flex; gap: 0.8rem; padding: 0 1.25rem 1.5rem; flex: none; }
 .step-arrow {
   flex: 1; display: flex; align-items: center; justify-content: center;
   padding: 1.4rem; border-radius: 14px; border: 1px solid var(--border);
   background: var(--surface); color: var(--text); font-size: 2rem;
   -webkit-tap-highlight-color: transparent; user-select: none;
+  -webkit-appearance: none; appearance: none; font-family: inherit; cursor: pointer; margin: 0;
 }
 .step-arrow.disabled { opacity: 0.3; pointer-events: none; }
 .step-arrow.primary { background: var(--accent); border-color: var(--accent); color: #1a0f04; }
@@ -416,7 +403,7 @@ textarea { resize: vertical; min-height: 6em; }
   .btn { font-size: 1.02rem; padding: 0.7rem 1.3rem; border-radius: 8px; }
   form.stack { max-width: 620px; gap: 1.2rem; }
   input, textarea { font-size: 1.05rem; padding: 0.7rem 0.85rem; }
-  .step-text { font-size: 2rem; }
+  .card-text { font-size: 2rem; }
   .step-arrow { font-size: 2.6rem; padding: 2rem; }
 }
 """
@@ -510,52 +497,99 @@ def render_recipe(slug):
 
 
 def render_step(slug, n):
+    """Renders the whole cooking-mode deck in one page load: every step is
+    already in the DOM as a card, and Prev/Next/swipe/arrow-keys just slide
+    the track client-side (see the inline script) — no page reload between
+    steps, so it feels like flipping flashcards rather than following
+    links. `n` only picks which card is showing on first paint (so a direct
+    link/bookmark/refresh lands on the right one); the URL keeps tracking
+    the current card via history.replaceState as you move through it."""
     r = load_recipe(slug)
     if r is None or not r["steps"]:
         return None
     total = len(r["steps"])
     n = max(1, min(n, total))
-    step = r["steps"][n - 1]
     slug_q = quote(r["slug"], safe="")
 
-    label_html = f"<span class='step-label'>{html.escape(step['label'])}</span>" if step["label"] else ""
-    pct = round(n / total * 100)
+    def render_card(s):
+        label_html = f"<span class='step-label'>{html.escape(s['label'])}</span>" if s["label"] else ""
+        return f"<div class='card'><div class='card-text'>{label_html}{s['html']}</div></div>"
 
-    prev_href = f"/recipe/{slug_q}/step/{n - 1}"
-    next_href = f"/recipe/{slug_q}/step/{n + 1}" if n < total else f"/recipe/{slug_q}"
-    prev_disabled = " disabled" if n == 1 else ""
-    next_label = "Done" if n == total else "Next"
-    next_class = "primary" if n == total else ""
+    cards_html = "".join(render_card(s) for s in r["steps"])
 
     body = (
-        f"<div class='step-page' id='stepPage' data-prev='{prev_href}' data-next='{next_href}'>"
+        f"<div class='step-page' id='stepPage'>"
         f"<div class='step-top'>"
         f"<a class='back' href='/recipe/{slug_q}'>&larr; {html.escape(r['title'])}</a>"
         f"</div>"
-        f"<div class='step-progress'>Step {n} of {total}</div>"
-        f"<div class='step-bar'><div class='step-bar-fill' style='width:{pct}%'></div></div>"
-        f"<div class='step-body'><div class='step-text'>{label_html}{step['html']}</div></div>"
+        f"<div class='step-progress' id='stepProgress'></div>"
+        f"<div class='step-bar'><div class='step-bar-fill' id='stepBarFill'></div></div>"
+        f"<div class='deck-viewport'><div class='deck-track' id='deckTrack'>{cards_html}</div></div>"
         f"<div class='step-nav'>"
-        f"<a class='step-arrow{prev_disabled}' href='{prev_href}' aria-label='Previous step'>&larr;<span class='lbl'>Prev</span></a>"
-        f"<a class='step-arrow {next_class}' href='{next_href}' aria-label='{next_label} step'>"
-        f"{'&#10003;' if n == total else '&rarr;'}<span class='lbl'>{next_label}</span></a>"
+        f"<button type='button' class='step-arrow' id='prevBtn' aria-label='Previous step'>&larr;<span class='lbl'>Prev</span></button>"
+        f"<button type='button' class='step-arrow' id='nextBtn' aria-label='Next step'>"
+        f"<span class='glyph'>&rarr;</span><span class='lbl'>Next</span></button>"
         f"</div></div>"
         "<script>"
         "(function(){"
-        "var el=document.getElementById('stepPage');"
+        f"var slug={json.dumps(quote(r['slug'], safe=''))};"
+        f"var total={total};"
+        f"var idx={n - 1};"
+        "var track=document.getElementById('deckTrack');"
+        "var progressEl=document.getElementById('stepProgress');"
+        "var barFill=document.getElementById('stepBarFill');"
+        "var prevBtn=document.getElementById('prevBtn');"
+        "var nextBtn=document.getElementById('nextBtn');"
+        "var nextGlyph=nextBtn.querySelector('.glyph');"
+        "var nextLbl=nextBtn.querySelector('.lbl');"
+        "function render(animate){"
+        "track.style.transition=animate?'transform 0.28s ease':'none';"
+        "track.style.transform='translateX('+(-idx*100)+'%)';"
+        "progressEl.textContent='Step '+(idx+1)+' of '+total;"
+        "barFill.style.width=Math.round((idx+1)/total*100)+'%';"
+        "prevBtn.classList.toggle('disabled', idx===0);"
+        "var atEnd=idx===total-1;"
+        "nextBtn.classList.toggle('primary', atEnd);"
+        "nextGlyph.innerHTML=atEnd?'&#10003;':'&rarr;';"
+        "nextLbl.textContent=atEnd?'Done':'Next';"
+        "history.replaceState(null,'','/recipe/'+slug+'/step/'+(idx+1));"
+        "}"
+        "function goNext(){"
+        "if(idx<total-1){idx++;render(true);}"
+        "else{window.location='/recipe/'+slug;}"
+        "}"
+        "function goPrev(){if(idx>0){idx--;render(true);}}"
+        "prevBtn.addEventListener('click',goPrev);"
+        "nextBtn.addEventListener('click',goNext);"
+        "document.addEventListener('keydown',function(e){"
+        "if(e.key==='ArrowRight')goNext();"
+        "if(e.key==='ArrowLeft')goPrev();"
+        "});"
+        "var root=document.getElementById('stepPage');"
         "var sx=null, sy=null;"
-        "el.addEventListener('touchstart',function(e){var t=e.changedTouches[0];sx=t.clientX;sy=t.clientY;},{passive:true});"
-        "el.addEventListener('touchend',function(e){"
+        "root.addEventListener('touchstart',function(e){var t=e.changedTouches[0];sx=t.clientX;sy=t.clientY;},{passive:true});"
+        "root.addEventListener('touchend',function(e){"
         "if(sx===null)return;"
         "var t=e.changedTouches[0];var dx=t.clientX-sx;var dy=t.clientY-sy;"
-        "if(Math.abs(dx)>60 && Math.abs(dx)>Math.abs(dy)){"
-        "window.location=dx<0?el.dataset.next:el.dataset.prev;"
-        "}"
+        "if(Math.abs(dx)>60 && Math.abs(dx)>Math.abs(dy)){if(dx<0)goNext();else goPrev();}"
         "sx=null;sy=null;"
         "},{passive:true});"
-        "document.addEventListener('keydown',function(e){"
-        "if(e.key==='ArrowRight')window.location=el.dataset.next;"
-        "if(e.key==='ArrowLeft')window.location=el.dataset.prev;"
+        "render(false);"
+        # Best-effort Screen Wake Lock: only actually works in a secure
+        # context (https, or localhost) per spec, so on a plain-HTTP LAN
+        # address like this one it silently does nothing — which is why
+        # the Android app also sets FLAG_KEEP_SCREEN_ON natively while a
+        # /step/ URL is showing (see MainActivity.kt). Kept here anyway so
+        # it works for free the day this ever sits behind HTTPS.
+        "var wakeLock=null;"
+        "function requestWake(){"
+        "if('wakeLock' in navigator){"
+        "navigator.wakeLock.request('screen').then(function(l){wakeLock=l;}).catch(function(){});"
+        "}"
+        "}"
+        "requestWake();"
+        "document.addEventListener('visibilitychange',function(){"
+        "if(document.visibilityState==='visible')requestWake();"
         "});"
         "})();"
         "</script>"
@@ -570,17 +604,10 @@ def render_new_recipe_form():
     body = (
         "<form class='stack' method='post' action='/recipes/new'>"
         "<label>Title<input name='title' placeholder='Grandma’s Fried Rice' required></label>"
-        "<label>Description (optional)<textarea name='description' placeholder='A quick one-pan weeknight fried rice.'></textarea></label>"
-        "<div class='row3'>"
-        "<label>Servings<input name='servings' placeholder='4'></label>"
-        "<label>Prep Time<input name='prep_time' placeholder='10 min'></label>"
-        "<label>Cook Time<input name='cook_time' placeholder='15 min'></label>"
-        "</div>"
-        "<label>Ingredients<textarea name='ingredients' placeholder='2 cups cooked rice&#10;2 eggs&#10;2 tbsp soy sauce' required></textarea>"
-        "<span class='hint'>One ingredient per line.</span></label>"
         "<label>Steps<textarea name='steps' placeholder='Heat oil in a wok over high heat&#10;Scramble the eggs, then set aside&#10;Add rice and stir-fry 3 minutes' required></textarea>"
-        "<span class='hint'>One step per line — each line becomes its own page in the step-by-step view.</span></label>"
-        "<label>Notes (optional)<textarea name='notes' placeholder='Day-old rice works best.'></textarea></label>"
+        "<span class='hint'>One step per line — each line becomes its own card in the step-by-step / cooking view.</span></label>"
+        "<label>Summary (optional)<textarea name='summary' placeholder='A quick one-pan weeknight fried rice with whatever vegetables are in the fridge.'></textarea>"
+        "<span class='hint'>Ingredients, timing, notes — whatever’s worth knowing before you start. Shown at the top of the recipe.</span></label>"
         "<div class='actions'><button class='btn primary' type='submit'>Save recipe</button></div>"
         "</form>"
     )
@@ -664,13 +691,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._redirect("/recipes/new")
             slug = save_recipe(
                 title=title,
-                description=form.get("description", ""),
-                servings=form.get("servings", ""),
-                prep_time=form.get("prep_time", ""),
-                cook_time=form.get("cook_time", ""),
-                ingredients=form.get("ingredients", ""),
+                summary=form.get("summary", ""),
                 steps=form.get("steps", ""),
-                notes=form.get("notes", ""),
             )
             return self._redirect(f"/recipe/{quote(slug, safe='')}")
 
