@@ -1,0 +1,9 @@
+<resources>
+    <!-- Matches the Cookbook web app's own dark theme (see the CSS in
+         server.py) so the native chrome and the WebView-rendered pages
+         feel like one app. -->
+    <color name="bg">#000000</color>
+    <color name="panel">#0D0D0F</color>
+    <color name="accent">#F2994A</color>
+    <color name="accent2">#FFAD66</color>
+</resources>
