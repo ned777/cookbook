@@ -348,6 +348,8 @@ header.top a.back:hover { color: var(--text); }
 .notes-block p { margin: 0.4rem 0; }
 .intro-block p { margin: 0.4rem 0 0; color: var(--text-dim); }
 .empty { color: var(--text-dim); padding: 1.5rem 0; }
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 1.2rem 0; }
+.pager-status { color: var(--text-dim); font-size: 0.85rem; }
 
 form.stack { display: flex; flex-direction: column; gap: 0.9rem; max-width: 560px; margin-top: 1.2rem; }
 form.stack label { font-size: 0.82rem; color: var(--text-dim); display: flex; flex-direction: column; gap: 0.35rem; }
@@ -430,18 +432,28 @@ def page(title, body_html, back_href=None, back_label=None):
     )
 
 
-def render_home():
+RECIPES_PER_PAGE = 10
+
+
+def render_home(page_num=1):
     recipes = load_recipes()
+    new_recipe_btn = "<div class='actions'><a class='btn primary' href='/recipes/new'>+ New Recipe</a></div>"
+
     if not recipes:
         body = (
             f"<p class='empty'>No recipes yet. Drop a .md file into "
             f"<code>{html.escape(RECIPES_DIR)}</code>, or type one in.</p>"
-            "<div class='actions'><a class='btn primary' href='/recipes/new'>+ New Recipe</a></div>"
+            f"{new_recipe_btn}"
         )
         return page("Cookbook", body)
 
+    total_pages = max(1, -(-len(recipes) // RECIPES_PER_PAGE))  # ceiling division
+    page_num = max(1, min(page_num, total_pages))
+    start = (page_num - 1) * RECIPES_PER_PAGE
+    page_recipes = recipes[start:start + RECIPES_PER_PAGE]
+
     cards = []
-    for r in recipes:
+    for r in page_recipes:
         n_steps = len(r["steps"])
         n_ing = sum(len(items) for _, items in r["ingredient_groups"])
         meta_bits = []
@@ -451,7 +463,6 @@ def render_home():
             meta_bits.append(f"{n_steps} step{'s' if n_steps != 1 else ''}")
         meta = " · ".join(meta_bits)
         slug_q = quote(r["slug"], safe="")
-        cook_btn = f"<a class='btn primary' href='/recipe/{slug_q}/step/1'>Cook</a>" if n_steps else ""
         cards.append(
             f"<div class='recipe-card'>"
             f"<h2><a href='/recipe/{slug_q}'>{html.escape(r['title'])}</a></h2>"
@@ -459,10 +470,20 @@ def render_home():
             f"<div class='intro intro-block'>{r['intro_html']}</div>"
             f"<div class='actions'>"
             f"<a class='btn' href='/recipe/{slug_q}'>View</a>"
-            f"{cook_btn}"
             f"</div></div>"
         )
-    body = "".join(cards) + "<div class='actions'><a class='btn' href='/recipes/new'>+ New Recipe</a></div>"
+
+    pager = ""
+    if total_pages > 1:
+        prev_link = f"<a class='btn' href='/?page={page_num - 1}'>&larr; Newer</a>" if page_num > 1 else "<span></span>"
+        next_link = f"<a class='btn' href='/?page={page_num + 1}'>Older &rarr;</a>" if page_num < total_pages else "<span></span>"
+        pager = (
+            f"<div class='pager'>{prev_link}"
+            f"<span class='pager-status'>Page {page_num} of {total_pages}</span>"
+            f"{next_link}</div>"
+        )
+
+    body = new_recipe_btn + "".join(cards) + pager + new_recipe_btn
     return page("Cookbook", body)
 
 
@@ -524,7 +545,7 @@ def render_step(slug, n):
         f"</div>"
         f"<div class='step-progress' id='stepProgress'></div>"
         f"<div class='step-bar'><div class='step-bar-fill' id='stepBarFill'></div></div>"
-        f"<div class='deck-viewport'><div class='deck-track' id='deckTrack'>{cards_html}</div></div>"
+        f"<div class='deck-viewport' id='deckViewport'><div class='deck-track' id='deckTrack'>{cards_html}</div></div>"
         f"<div class='step-nav'>"
         f"<button type='button' class='step-arrow' id='prevBtn' aria-label='Previous step'>&larr;<span class='lbl'>Prev</span></button>"
         f"<button type='button' class='step-arrow' id='nextBtn' aria-label='Next step'>"
@@ -536,6 +557,7 @@ def render_step(slug, n):
         f"var total={total};"
         f"var idx={n - 1};"
         "var track=document.getElementById('deckTrack');"
+        "var viewport=document.getElementById('deckViewport');"
         "var progressEl=document.getElementById('stepProgress');"
         "var barFill=document.getElementById('stepBarFill');"
         "var prevBtn=document.getElementById('prevBtn');"
@@ -543,8 +565,14 @@ def render_step(slug, n):
         "var nextGlyph=nextBtn.querySelector('.glyph');"
         "var nextLbl=nextBtn.querySelector('.lbl');"
         "function render(animate){"
+        # translateX('%') resolves against the TRACK's own full width (all
+        # cards laid end to end), not the one-card-wide viewport — so a
+        # percentage here is off by a factor of `total` and was leaving two
+        # cards half-visible instead of showing exactly one. Pixel math
+        # against the viewport's actual rendered width sidesteps that
+        # entirely and is exact regardless of how many cards there are.
         "track.style.transition=animate?'transform 0.28s ease':'none';"
-        "track.style.transform='translateX('+(-idx*100)+'%)';"
+        "track.style.transform='translateX('+(-idx*viewport.clientWidth)+'px)';"
         "progressEl.textContent='Step '+(idx+1)+' of '+total;"
         "barFill.style.width=Math.round((idx+1)/total*100)+'%';"
         "prevBtn.classList.toggle('disabled', idx===0);"
@@ -574,6 +602,7 @@ def render_step(slug, n):
         "if(Math.abs(dx)>60 && Math.abs(dx)>Math.abs(dy)){if(dx<0)goNext();else goPrev();}"
         "sx=null;sy=null;"
         "},{passive:true});"
+        "window.addEventListener('resize',function(){render(false);});"
         "render(false);"
         # Best-effort Screen Wake Lock: only actually works in a secure
         # context (https, or localhost) per spec, so on a plain-HTTP LAN
@@ -660,11 +689,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._check_auth():
             return
-        path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
         parts = [unquote(p) for p in path.split("/") if p]
 
         if not parts:
-            return self._send_html(render_home())
+            query = parse_qs(parsed_url.query)
+            try:
+                page_num = max(1, int(query.get("page", ["1"])[0]))
+            except ValueError:
+                page_num = 1
+            return self._send_html(render_home(page_num))
         if parts == ["recipes", "new"]:
             return self._send_html(render_new_recipe_form())
         if len(parts) == 2 and parts[0] == "recipe":
