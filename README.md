@@ -22,12 +22,15 @@ update.
 
 - **Recipe list** — every `.md` file directly in the Cooking folder shows
   up as a card with its ingredient/step counts and intro text.
-- **Step-by-step cooking view** — full black screen, one step at a time,
-  a big arrow on each side to move forward/back. Swipe left/right works
-  too (touch), and desktop gets the arrow keys.
-- **Type a recipe in** — a form for title, description, servings/prep/cook
-  time, ingredients (one per line), steps (one per line), and notes. Saves
-  as a Markdown file with the same shape the parser reads back.
+- **Cooking mode** — a full-black, flashcard-style deck: one step per
+  card, a big arrow on each side to slide forward/back, or just swipe
+  (touch) / use the arrow keys (desktop). Cards slide in place client-side
+  — no page reload between steps. The Android app also keeps the screen
+  from sleeping the whole time you're on a step.
+- **Type a recipe in** — a form for just title, steps (one per line — each
+  becomes its own card), and a free-text summary for whatever else is
+  worth knowing (ingredients, timing, notes). Saves as a Markdown file with
+  the same shape the parser reads back.
 - **Reads real recipe-site Markdown too** — the parser is heuristic, not
   strict: it copes with an `## Instructions` *or* `## How to Make It` *or*
   `## Preparation Instructions` heading, ingredients as a bullet list *or*
@@ -79,29 +82,42 @@ systemctl --user enable --now cookbook.service
 ```markdown
 # Recipe Title
 
-Optional description paragraph.
-
-**Servings:** 4 | **Prep Time:** 10 min | **Cook Time:** 20 min
-
-## Ingredients
-
-- 2 cups rice
-- 2 eggs
+Optional summary — ingredients, servings, timing, notes, whatever's
+worth knowing before you start.
 
 ## Instructions
 
 1. Do the first thing.
 2. Do the second thing.
-
-## Notes
-
-- Anything worth remembering for next time.
 ```
 
-Each numbered item under Instructions becomes its own page in the
-step-by-step view.
+Each numbered item under Instructions becomes its own card in cooking
+mode. Recipes pasted or copied in from an actual recipe site tend to have
+a proper `## Ingredients` list (or table) too, and those still render fine
+on the recipe's overview page — the New Recipe form just doesn't bother
+asking for one separately.
 
 ## Data
 
 Recipes live in `~/Nextcloud/Documents/Cooking`, not in this repo —
 they're your data, already synced by Nextcloud, not part of the app.
+
+## Android app
+
+`android/` is a thin native wrapper around the web app — a WebView pointed
+at the server, same idea as
+[Vehicle Maintenance Record](https://github.com/ned777/vehicle-maintenance)'s
+Android client. It has no data or logic of its own; every screen is just
+this same server rendering a page.
+
+1. Open the `android/` folder in Android Studio (or build from the
+   command line with the Gradle install at
+   `~/android-toolchain/gradle-8.7`).
+2. Copy `android/secrets.properties.example` to
+   `android/secrets.properties` and fill in your server's address and
+   Basic Auth credentials. Gitignored — never committed.
+3. Build & install the debug APK:
+   ```sh
+   cd android && gradle assembleDebug
+   # APK lands at android/app/build/outputs/apk/debug/app-debug.apk
+   ```

@@ -1,3 +1,12 @@
 local_secrets.py
 __pycache__/
 *.pyc
+
+# Android app (android/)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/secrets.properties
+*.apk
+.idea/
