@@ -799,6 +799,11 @@ def _parse_multipart(body, content_type_header):
     the whole thing to email.message_from_bytes lets a well-tested stdlib
     parser handle the fiddly part (boundary matching, binary payloads)
     instead of a bespoke one.
+
+    `files` maps each field name to a LIST of (filename, bytes) — a
+    multi-file <input multiple> sends several parts under the same field
+    name, and a dict keyed by name alone would silently keep only the
+    last one.
     """
     header = f"Content-Type: {content_type_header}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii", "ignore")
     msg = email.message_from_bytes(header + body)
@@ -817,7 +822,7 @@ def _parse_multipart(body, content_type_header):
             continue
         payload = part.get_payload(decode=True) or b""
         if filename:
-            files[name] = (filename, payload)
+            files.setdefault(name, []).append((filename, payload))
         else:
             fields[name] = payload.decode("utf-8", errors="replace")
     return fields, files
@@ -1068,11 +1073,9 @@ textarea { resize: vertical; min-height: 6em; }
 .photo-lightbox-prev { left: 1rem; }
 .photo-lightbox-next { right: 1rem; }
 
-.photo-field-preview {
-  display: block; max-width: 100%; max-height: 200px; border-radius: 10px;
-  margin-top: 0.6rem; border: 1px solid var(--border);
-  object-fit: contain; align-self: flex-start;
-}
+.photo-uploader { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; margin: 0 0 1.1rem; }
+.photo-uploader progress { width: 140px; height: 8px; accent-color: var(--accent); }
+.photo-uploader .hint { margin: 0; }
 
 /* --- Step viewer: full-black flashcard deck, swipe/arrow between cards -- */
 .step-page {
@@ -1346,32 +1349,62 @@ def _meta_fields_html(prep_time="", cook_time="", difficulty=""):
     )
 
 
-def _photo_field_html():
+def _photo_uploader_html(slug):
+    """A standalone widget, deliberately outside the big Edit <form> —
+    adding photos is its own independent action (upload right away, no
+    'Save changes' needed, no confirm dialog), not part of editing the
+    recipe's text. Lives on both the recipe page and the Edit form."""
+    slug_q = quote(slug, safe="")
     return (
-        "<label>Add Photo (optional)"
-        "<input type='file' name='photo' id='photoInput' accept='image/*'>"
-        "<img id='photoFieldPreview' class='photo-field-preview' hidden src='' alt=''>"
-        "<span class='hint'>Add one anytime you cook this — they build into a dated gallery on the recipe page.</span>"
-        "</label>"
+        f"<div class='photo-uploader' data-upload-url='/recipe/{slug_q}/photos/upload'>"
+        "<input type='file' id='quickPhotoInput' accept='image/*' multiple hidden>"
+        "<button type='button' class='btn' id='quickPhotoBtn'>+ Add Photo</button>"
+        "<progress id='quickPhotoProgress' max='100' value='0' hidden></progress>"
+        "<span class='hint' id='quickPhotoStatus'></span>"
+        "</div>"
     )
 
 
-# Live preview as soon as a file's picked, before the form is even submitted
-# — works identically whether that file came from a phone's camera/gallery
-# or a desktop file browser, since <input type=file accept=image/*> already
-# offers the right picker for whichever device opens the page.
-PHOTO_FIELD_SCRIPT = (
+# Multiple files in one go, with a real upload-progress bar — XMLHttpRequest
+# rather than fetch() because only XHR exposes upload progress without extra
+# plumbing. Posts straight to /recipe/<slug>/photos/upload (its own tiny
+# endpoint, independent of the recipe-edit form) and reloads the page on
+# success so the gallery picks up the new photo(s); this widget can appear
+# more than once in the DOM only in the sense that only one instance is
+# ever rendered per page, so a plain querySelector is fine.
+PHOTO_UPLOADER_SCRIPT = (
     "<script>"
     "(function(){"
-    "var input=document.getElementById('photoInput');"
-    "var preview=document.getElementById('photoFieldPreview');"
-    "if(!input) return;"
+    "var root=document.querySelector('.photo-uploader');"
+    "if(!root) return;"
+    "var url=root.getAttribute('data-upload-url');"
+    "var input=document.getElementById('quickPhotoInput');"
+    "var btn=document.getElementById('quickPhotoBtn');"
+    "var bar=document.getElementById('quickPhotoProgress');"
+    "var status=document.getElementById('quickPhotoStatus');"
+    "btn.addEventListener('click',function(){ input.click(); });"
     "input.addEventListener('change',function(){"
-    "var file=input.files && input.files[0];"
-    "if(!file) return;"
-    "var reader=new FileReader();"
-    "reader.onload=function(e){ preview.src=e.target.result; preview.hidden=false; };"
-    "reader.readAsDataURL(file);"
+    "var files=input.files;"
+    "if(!files || !files.length) return;"
+    "var form=new FormData();"
+    "for(var i=0;i<files.length;i++){ form.append('photo', files[i]); }"
+    "var xhr=new XMLHttpRequest();"
+    "xhr.open('POST', url);"
+    "btn.disabled=true; bar.hidden=false; bar.value=0;"
+    "status.textContent='Uploading '+files.length+(files.length>1?' photos...':' photo...');"
+    "xhr.upload.addEventListener('progress',function(e){"
+    "if(e.lengthComputable){ bar.value=Math.round((e.loaded/e.total)*100); }"
+    "});"
+    "xhr.onload=function(){"
+    "if(xhr.status>=200 && xhr.status<300){"
+    "status.textContent='Done — refreshing...';"
+    "window.location.reload();"
+    "}else{"
+    "status.textContent='Upload failed. Try again.'; btn.disabled=false; bar.hidden=true;"
+    "}"
+    "};"
+    "xhr.onerror=function(){ status.textContent='Upload failed. Try again.'; btn.disabled=false; bar.hidden=true; };"
+    "xhr.send(form);"
     "});"
     "})();"
     "</script>"
@@ -1684,13 +1717,15 @@ def render_recipe(slug):
     )
 
     photo_html = _photo_grid_html(r["slug"], list_recipe_photos(r["slug"]))
+    uploader_html = _photo_uploader_html(r["slug"])
 
     body = (
-        f"{photo_html}"
+        f"{photo_html}{uploader_html}"
         f"<div class='intro-block'>{r['intro_html']}</div>"
         f"{actions}"
         f"{'<div class=\"section-title\">Ingredients</div>' + ''.join(groups_html) if groups_html else ''}"
         f"{''.join(notes_html)}"
+        f"{PHOTO_UPLOADER_SCRIPT}"
     )
     return page(r["title"], body, back_href="/", back_label="My Kitchen")
 
@@ -1924,7 +1959,7 @@ def render_step(slug, n):
 
 def render_new_recipe_form():
     body = (
-        "<form class='stack' method='post' action='/recipes/new' enctype='multipart/form-data'>"
+        "<form class='stack' method='post' action='/recipes/new'>"
         "<label>Title<input name='title' placeholder='Grandma’s Fried Rice' required></label>"
         + _meta_fields_html()
         + _list_builder_field(
@@ -1937,11 +1972,10 @@ def render_new_recipe_form():
         )
         + "<label>Summary (optional)<textarea name='summary' placeholder='A quick one-pan weeknight fried rice with whatever vegetables are in the fridge.'></textarea>"
         "<span class='hint'>Timing, notes, anything else worth knowing before you start. Shown at the top of the recipe.</span></label>"
-        + _photo_field_html()
-        + "<div class='actions'><button class='btn primary' type='submit'>Save recipe</button></div>"
+        "<span class='hint'>Photos are added from the recipe page once it's saved.</span>"
+        "<div class='actions'><button class='btn primary' type='submit'>Save recipe</button></div>"
         "</form>"
         + LIST_BUILDER_SCRIPT
-        + PHOTO_FIELD_SCRIPT
     )
     return page("New Recipe", body, back_href="/", back_label="My Kitchen")
 
@@ -1975,7 +2009,6 @@ def render_edit_form(slug):
 
     body = (
         f"<form class='stack' method='post' action='/recipe/{slug_q}/edit' "
-        f"enctype='multipart/form-data' "
         f"onsubmit='return confirmAction(this, \"Save changes to this recipe?\")'>"
         f"<label>Title<input name='title' value='{title}' required></label>"
         + _meta_fields_html(
@@ -1994,15 +2027,15 @@ def render_edit_form(slug):
         )
         + f"<label>Summary (optional)<textarea name='summary'>{summary}</textarea>"
         f"<span class='hint'>Timing, notes, anything else worth knowing before you start. Shown at the top of the recipe.</span></label>"
-        + _photo_field_html()
-        + _photo_manage_html(slug, photos)
         + f"<div class='actions'>"
         f"<button class='btn primary' type='submit'>Save changes</button>"
         f"<a class='btn' href='/recipe/{slug_q}'>Cancel</a>"
         f"</div>"
         f"</form>"
         f"{LIST_BUILDER_SCRIPT}"
-        f"{PHOTO_FIELD_SCRIPT}"
+        + _photo_uploader_html(slug)
+        + _photo_manage_html(slug, photos)
+        + f"{PHOTO_UPLOADER_SCRIPT}"
         f"<div class='actions'>"
         f"<form method='post' action='/recipe/{slug_q}/delete'>"
         f"<button type='submit' class='btn danger' data-confirm='{delete_msg}' "
@@ -2223,9 +2256,6 @@ class Handler(BaseHTTPRequestHandler):
                 cook_time=form.get("cook_time", ""),
                 difficulty=form.get("difficulty", ""),
             )
-            photo = self.uploaded_files.get("photo")
-            if photo and photo[0]:
-                add_recipe_photo(slug, photo[0], photo[1])
             return self._redirect(f"/recipe/{quote(slug, safe='')}")
 
         if parts == ["recommend"]:
@@ -2243,10 +2273,17 @@ class Handler(BaseHTTPRequestHandler):
                 cook_time=form.get("cook_time", ""),
                 difficulty=form.get("difficulty", ""),
             )
-            photo = self.uploaded_files.get("photo")
-            if photo and photo[0]:
-                add_recipe_photo(slug, photo[0], photo[1])
             return self._redirect(f"/recipe/{quote(slug, safe='')}") if ok else self._not_found()
+
+        if len(parts) == 4 and parts[0] == "recipe" and parts[2] == "photos" and parts[3] == "upload":
+            slug = parts[1]
+            for filename, data in self.uploaded_files.get("photo", []):
+                if filename:
+                    add_recipe_photo(slug, filename, data)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
 
         if len(parts) == 4 and parts[0] == "recipe" and parts[2] == "photo" and parts[3] == "delete":
             # Trailing "-delete" would collide with a legitimately weird
