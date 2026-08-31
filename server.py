@@ -13,8 +13,9 @@ the page loads.
 The folder defaults to ~/Documents/Cooking; override it with the
 COOKBOOK_RECIPES_DIR environment variable (set in the systemd unit, not
 committed here) if your actual data lives somewhere else. Recipe photos
-live in a separate folder (default ~/Documents/Cooking Photos, override
-with COOKBOOK_PHOTOS_DIR) rather than mixed in alongside the .md files.
+live in a "Cooking Photos" subfolder nested inside that same folder
+(default ~/Documents/Cooking/Cooking Photos, override with
+COOKBOOK_PHOTOS_DIR) rather than mixed in alongside the .md files themselves.
 
 Run:  python3 server.py
 Serves on 0.0.0.0:8092, protected by HTTP Basic Auth.
@@ -614,10 +615,11 @@ def empty_trash():
 
 # --- Recipe photos -------------------------------------------------------
 # A recipe can carry a whole gallery of photos — "what it looked like this
-# time I cooked it" — not just one. They live in a separate top-level
-# folder (PHOTOS_DIR, a sibling of RECIPES_DIR, not nested under it) so
-# they never get mixed in with the .md files on disk — one subfolder per
-# recipe, named by slug.
+# time I cooked it" — not just one. They live in a "Cooking Photos"
+# subfolder nested inside RECIPES_DIR (PHOTOS_DIR) — one subfolder per
+# recipe under that, named by slug. load_recipes() only picks up top-level
+# .md files (see _list_md_files), so this nested folder is automatically
+# invisible to it — no risk of it being mistaken for a recipe.
 #
 # Each file is named after its own timestamp — the photo's EXIF
 # DateTimeOriginal when there is one, otherwise the moment it was uploaded
@@ -635,7 +637,7 @@ PHOTO_CONTENT_TYPES = {
 }
 PHOTOS_DIR = os.environ.get(
     "COOKBOOK_PHOTOS_DIR",
-    os.path.join(os.path.expanduser("~"), "Documents", "Cooking Photos"),
+    os.path.join(RECIPES_DIR, "Cooking Photos"),
 )
 
 
