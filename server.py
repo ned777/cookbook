@@ -1038,7 +1038,7 @@ textarea { resize: vertical; min-height: 6em; }
 .photo-tile img.recipe-photo { width: 100%; height: 100%; object-fit: cover; }
 .photo-tile.see-more { cursor: pointer; }
 .photo-tile.see-more .see-more-label {
-  position: absolute; inset: 0; background: rgba(0, 0, 0, 0.55); color: #fff;
+  position: absolute; inset: 0; background: rgba(45, 212, 191, 0.88); color: #052420;
   display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.95rem;
 }
 .photo-list { display: flex; flex-direction: column; gap: 1rem; margin: 1rem 0; }
