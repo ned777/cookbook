@@ -193,6 +193,68 @@ def is_step_section(heading, body):
     return bool(INSTRUCTION_WORD_RE.search(heading) or (numbered_ratio > 0.5 and not INGREDIENT_WORD_RE.search(heading)))
 
 
+_META_LABEL_RE = re.compile(
+    r"\*\*(Servings|Prep(?:\s*Time)?|Cook(?:\s*Time)?|Total(?:\s*Time)?|Difficulty):?\*\*\s*([^\n*|]+)",
+    re.IGNORECASE,
+)
+
+
+def _parse_minutes(text):
+    """Best-effort minutes out of a free-text duration like '35 min',
+    'About 2 hours', or '1 hr 20 min'. Used only for the time-bucket
+    filter, so an unparseable value (None) just drops out of every
+    bucket rather than raising."""
+    if not text:
+        return None
+    t = text.lower()
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*(?:(\d+)\s*(?:minutes?|mins?))?", t)
+    if m:
+        hours = float(m.group(1))
+        mins = int(m.group(2)) if m.group(2) else 0
+        return round(hours * 60 + mins)
+    nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", t)]
+    if not nums:
+        return None
+    return round(sum(nums) / len(nums))
+
+
+def extract_recipe_meta(intro_text):
+    """Servings/Total Time/Difficulty pulled out of the intro's free-text
+    '**Label:** value' fields — scraped recipes carry these in wildly
+    different shapes (Total vs Total Time, Prep vs Prep Time, a byline
+    like '30 minutes | 4 servings', or nothing at all), so every field
+    here is optional. Total Time falls back to Prep + Cook when a recipe
+    gives those two but not a total."""
+    found = {}
+    for label, value in _META_LABEL_RE.findall(intro_text):
+        key = label.strip().lower()
+        if key.startswith("prep"):
+            key = "prep_time"
+        elif key.startswith("cook"):
+            key = "cook_time"
+        elif key.startswith("total"):
+            key = "total_time"
+        elif key.startswith("serving"):
+            key = "servings"
+        elif key.startswith("difficulty"):
+            key = "difficulty"
+        found.setdefault(key, value.strip().rstrip(".").strip())
+
+    if "total_time" not in found and "prep_time" in found and "cook_time" in found:
+        prep_min = _parse_minutes(found["prep_time"])
+        cook_min = _parse_minutes(found["cook_time"])
+        if prep_min is not None and cook_min is not None:
+            found["total_time"] = f"{prep_min + cook_min} min"
+
+    total_time = found.get("total_time")
+    return {
+        "servings": found.get("servings"),
+        "total_time": total_time,
+        "total_time_minutes": _parse_minutes(total_time),
+        "difficulty": found.get("difficulty"),
+    }
+
+
 def parse_recipe(text):
     title, intro_lines, sections = split_sections(text)
 
@@ -238,6 +300,7 @@ def parse_recipe(text):
         "ingredient_groups": ingredient_groups,
         "steps": steps,
         "notes_sections": notes_sections,
+        "meta": extract_recipe_meta("\n".join(intro_lines)),
     }
 
 
@@ -578,6 +641,21 @@ header.top a.back:hover { color: var(--text); }
 .pager { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 1.2rem 0; }
 .pager-status { color: var(--text-dim); font-size: 0.85rem; }
 
+.card-stats { color: var(--text-dim); font-size: 0.85rem; margin: 0.5rem 0 0; }
+
+.search-bar { display: flex; gap: 0.6rem; margin: 1.1rem 0 0.9rem; }
+.search-bar input {
+  flex: 1; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); padding: 0.6rem 0.7rem; font-size: 0.95rem; font-family: inherit;
+}
+.filter-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+.filter-label { color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 0.2rem; }
+.chip {
+  padding: 0.35rem 0.8rem; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--text-dim); font-size: 0.82rem; font-weight: 600;
+}
+.chip.active { background: var(--gradient); border-color: transparent; color: #04211D; }
+
 form.stack { display: flex; flex-direction: column; gap: 0.9rem; max-width: 560px; margin-top: 1.2rem; }
 form.stack label { font-size: 0.82rem; color: var(--text-dim); display: flex; flex-direction: column; gap: 0.35rem; }
 input, textarea {
@@ -649,6 +727,44 @@ textarea { resize: vertical; min-height: 6em; }
 .step-arrow.primary { background: var(--gradient); border-color: transparent; color: #04211D; box-shadow: 0 8px 22px -10px var(--accent-2); }
 .step-arrow .lbl { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; margin-left: 0.5rem; font-family: 'Inter', sans-serif; font-weight: 700; }
 
+/* --- Cook-mode timer -------------------------------------------------- */
+.timer-btn {
+  width: 42px; height: 42px; border-radius: 50%; flex: none;
+  background: var(--surface); border: 1px solid var(--border); color: var(--accent);
+  font-size: 1.2rem; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.timer-btn.running { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.timer-panel {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 900;
+  background: var(--surface); border-top: 1px solid var(--border);
+  border-radius: 20px 20px 0 0; padding: 1.5rem 1.5rem 2rem;
+  box-shadow: 0 -12px 32px -12px rgba(0,0,0,0.8);
+}
+.timer-panel[hidden] { display: none; }
+.timer-display {
+  font-family: 'Fraunces', Georgia, serif; font-size: 3rem; font-weight: 600;
+  text-align: center; color: var(--accent); margin-bottom: 1rem;
+}
+.timer-presets { display: flex; gap: 0.6rem; flex-wrap: wrap; justify-content: center; margin-bottom: 1rem; }
+.timer-presets button {
+  padding: 0.55rem 1rem; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--text); font-weight: 600; font-size: 0.9rem;
+  cursor: pointer;
+}
+.timer-custom { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.timer-custom input {
+  flex: 0 0 56px; min-width: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); padding: 0.6rem 0.4rem; font-size: 0.95rem; text-align: center;
+}
+.timer-custom button, .timer-actions button {
+  flex: 1;
+  padding: 0.6rem 1.1rem; border-radius: 8px; font-weight: 600; font-size: 0.9rem;
+  border: 1px solid var(--border); background: var(--gradient); color: #04211D; cursor: pointer;
+}
+.timer-actions { display: flex; justify-content: center; gap: 0.7rem; }
+.timer-actions button { background: var(--surface-2); color: var(--text); }
+
 @media (min-width: 820px) {
   body { font-size: 19px; }
   .wrap { max-width: 1000px; padding: 0 2rem 5rem; }
@@ -719,8 +835,58 @@ def page(title, body_html, back_href=None, back_label=None):
 RECIPES_PER_PAGE = 10
 
 
-def render_home(page_num=1):
-    recipes = load_recipes()
+_TIME_BUCKETS = [
+    ("15", "15 min or less"),
+    ("30", "30 min or less"),
+    ("60", "1 hour or less"),
+    ("60plus", "Over 1 hour"),
+]
+_DIFFICULTIES = ["Easy", "Medium", "Hard"]
+
+
+def _in_time_bucket(minutes, bucket):
+    if minutes is None:
+        return False
+    if bucket == "15":
+        return minutes <= 15
+    if bucket == "30":
+        return minutes <= 30
+    if bucket == "60":
+        return minutes <= 60
+    if bucket == "60plus":
+        return minutes > 60
+    return True
+
+
+def _filter_href(q, difficulty, time_bucket):
+    parts = []
+    if q:
+        parts.append(f"q={quote(q, safe='')}")
+    if difficulty:
+        parts.append(f"difficulty={quote(difficulty, safe='')}")
+    if time_bucket:
+        parts.append(f"time={quote(time_bucket, safe='')}")
+    return "/?" + "&".join(parts) if parts else "/"
+
+
+def _chip(label, active, href):
+    cls = "chip active" if active else "chip"
+    return f"<a class='{cls}' href='{href}'>{html.escape(label)}</a>"
+
+
+def _page_href(page_num, q, difficulty, time_bucket):
+    parts = [f"page={page_num}"]
+    if q:
+        parts.append(f"q={quote(q, safe='')}")
+    if difficulty:
+        parts.append(f"difficulty={quote(difficulty, safe='')}")
+    if time_bucket:
+        parts.append(f"time={quote(time_bucket, safe='')}")
+    return "/?" + "&".join(parts)
+
+
+def render_home(page_num=1, q=None, difficulty=None, time_bucket=None):
+    all_recipes = load_recipes()
     trash_count = len(load_trash())
     top_actions = (
         "<div class='actions'>"
@@ -731,11 +897,51 @@ def render_home(page_num=1):
     )
     new_recipe_btn = "<div class='actions'><a class='btn primary' href='/recipes/new'>+ New Recipe</a></div>"
 
-    if not recipes:
+    if not all_recipes:
         body = (
             f"<p class='empty'>No recipes yet. Drop a .md file into "
             f"<code>{html.escape(RECIPES_DIR)}</code>, or type one in.</p>"
             f"{top_actions}"
+        )
+        return page("Cookbook", body)
+
+    search_bar = (
+        f"<form class='search-bar' method='get' action='/'>"
+        f"<input type='hidden' name='difficulty' value='{html.escape(difficulty or '')}'>"
+        f"<input type='hidden' name='time' value='{html.escape(time_bucket or '')}'>"
+        f"<input type='text' name='q' value='{html.escape(q or '')}' placeholder='Search recipes by title...'>"
+        f"<button type='submit' class='btn primary'>Search</button>"
+        f"</form>"
+    )
+    difficulty_chips = "".join(
+        _chip(d, (difficulty or "").lower() == d.lower(),
+              _filter_href(q, None if (difficulty or "").lower() == d.lower() else d, time_bucket))
+        for d in _DIFFICULTIES
+    )
+    time_chips = "".join(
+        _chip(label, time_bucket == key,
+              _filter_href(q, difficulty, None if time_bucket == key else key))
+        for key, label in _TIME_BUCKETS
+    )
+    filter_bar = (
+        f"<div class='filter-row'><span class='filter-label'>Difficulty</span>{difficulty_chips}</div>"
+        f"<div class='filter-row'><span class='filter-label'>Time</span>{time_chips}</div>"
+    )
+
+    recipes = all_recipes
+    if q:
+        ql = q.strip().lower()
+        recipes = [r for r in recipes if ql in r["title"].lower()]
+    if difficulty:
+        recipes = [r for r in recipes if (r["meta"]["difficulty"] or "").strip().lower() == difficulty.lower()]
+    if time_bucket:
+        recipes = [r for r in recipes if _in_time_bucket(r["meta"]["total_time_minutes"], time_bucket)]
+
+    if not recipes:
+        body = (
+            top_actions + search_bar + filter_bar
+            + "<p class='empty'>No recipes match those filters.</p>"
+            + new_recipe_btn
         )
         return page("Cookbook", body)
 
@@ -753,13 +959,24 @@ def render_home(page_num=1):
             meta_bits.append(f"{n_ing} ingredient{'s' if n_ing != 1 else ''}")
         if n_steps:
             meta_bits.append(f"{n_steps} step{'s' if n_steps != 1 else ''}")
-        meta = " · ".join(meta_bits)
+        meta_line = " · ".join(meta_bits)
+
+        m = r["meta"]
+        stat_bits = []
+        if m["servings"]:
+            stat_bits.append(f"Servings: {html.escape(m['servings'])}")
+        if m["total_time"]:
+            stat_bits.append(f"Total Time: {html.escape(m['total_time'])}")
+        if m["difficulty"]:
+            stat_bits.append(f"Difficulty: {html.escape(m['difficulty'])}")
+        stats_html = f"<div class='card-stats'>{' &middot; '.join(stat_bits)}</div>" if stat_bits else ""
+
         slug_q = quote(r["slug"], safe="")
         cards.append(
             f"<div class='recipe-card'>"
             f"<h2><a href='/recipe/{slug_q}'>{html.escape(r['title'])}</a></h2>"
-            f"<div class='meta'>{meta}</div>"
-            f"<div class='intro intro-block'>{r['intro_html']}</div>"
+            f"<div class='meta'>{meta_line}</div>"
+            f"{stats_html}"
             f"<div class='actions'>"
             f"<a class='btn' href='/recipe/{slug_q}'>View</a>"
             f"</div></div>"
@@ -767,15 +984,21 @@ def render_home(page_num=1):
 
     pager = ""
     if total_pages > 1:
-        prev_link = f"<a class='btn' href='/?page={page_num - 1}'>&larr; Prev</a>" if page_num > 1 else "<span></span>"
-        next_link = f"<a class='btn' href='/?page={page_num + 1}'>Next &rarr;</a>" if page_num < total_pages else "<span></span>"
+        prev_link = (
+            f"<a class='btn' href='{_page_href(page_num - 1, q, difficulty, time_bucket)}'>&larr; Prev</a>"
+            if page_num > 1 else "<span></span>"
+        )
+        next_link = (
+            f"<a class='btn' href='{_page_href(page_num + 1, q, difficulty, time_bucket)}'>Next &rarr;</a>"
+            if page_num < total_pages else "<span></span>"
+        )
         pager = (
             f"<div class='pager'>{prev_link}"
             f"<span class='pager-status'>Page {page_num} of {total_pages}</span>"
             f"{next_link}</div>"
         )
 
-    body = top_actions + "".join(cards) + pager + new_recipe_btn
+    body = top_actions + search_bar + filter_bar + "".join(cards) + pager + new_recipe_btn
     return page("Cookbook", body)
 
 
@@ -840,11 +1063,36 @@ def render_step(slug, n):
 
     cards_html = "".join(render_card(s) for s in r["steps"])
 
+    timer_panel = (
+        "<div class='timer-panel' id='timerPanel' hidden>"
+        "<div class='timer-display' id='timerDisplay'>00:00</div>"
+        "<div class='timer-presets'>"
+        "<button type='button' data-min='1'>1 min</button>"
+        "<button type='button' data-min='5'>5 min</button>"
+        "<button type='button' data-min='10'>10 min</button>"
+        "<button type='button' data-min='15'>15 min</button>"
+        "<button type='button' data-min='20'>20 min</button>"
+        "</div>"
+        "<div class='timer-custom'>"
+        "<input type='number' id='timerCustomHr' min='0' step='1' placeholder='Hr'>"
+        "<input type='number' id='timerCustomMin' min='0' max='59' step='1' placeholder='Min'>"
+        "<input type='number' id='timerCustomSec' min='0' max='59' step='1' placeholder='Sec'>"
+        "<button type='button' id='timerCustomStart'>Start</button>"
+        "</div>"
+        "<div class='timer-actions'>"
+        "<button type='button' id='timerCancel'>Cancel</button>"
+        "<button type='button' id='timerClose'>Close</button>"
+        "</div>"
+        "</div>"
+    )
+
     body = (
         f"<div class='step-page' id='stepPage'>"
         f"<div class='step-top'>"
         f"<a class='back' href='/recipe/{slug_q}'>&larr; {html.escape(r['title'])}</a>"
+        f"<button type='button' class='timer-btn' id='timerBtn' aria-label='Timer'>&#9200;</button>"
         f"</div>"
+        f"{timer_panel}"
         f"<div class='step-progress' id='stepProgress'></div>"
         f"<div class='step-bar'><div class='step-bar-fill' id='stepBarFill'></div></div>"
         f"<div class='deck-viewport' id='deckViewport'><div class='deck-track' id='deckTrack'>{cards_html}</div></div>"
@@ -921,6 +1169,96 @@ def render_step(slug, n):
         "requestWake();"
         "document.addEventListener('visibilitychange',function(){"
         "if(document.visibilityState==='visible')requestWake();"
+        "});"
+        "})();"
+        "</script>"
+        "<script>"
+        "(function(){"
+        # Countdown lives entirely in this one page load (see the deck
+        # script above) so it keeps running across step swipes, which are
+        # client-side only. Audio is a few square-wave beeps via
+        # AudioContext rather than a bundled sound file — this server is
+        # stdlib-only with no static asset pipeline, and it sidesteps
+        # mobile autoplay restrictions since the context is created/resumed
+        # inside a real button-tap handler (Start), not from the timer
+        # callback that fires later on its own.
+        "var btn=document.getElementById('timerBtn');"
+        "var panel=document.getElementById('timerPanel');"
+        "var display=document.getElementById('timerDisplay');"
+        "var closeBtn=document.getElementById('timerClose');"
+        "var cancelBtn=document.getElementById('timerCancel');"
+        "var customHrInput=document.getElementById('timerCustomHr');"
+        "var customMinInput=document.getElementById('timerCustomMin');"
+        "var customSecInput=document.getElementById('timerCustomSec');"
+        "var customBtn=document.getElementById('timerCustomStart');"
+        "var presetBtns=panel.querySelectorAll('[data-min]');"
+        "var endTime=null, intervalId=null, audioCtx=null;"
+        "function fmt(sec){"
+        "sec=Math.max(0,Math.round(sec));"
+        "var h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=sec%60;"
+        "var mm=(m<10?'0':'')+m, ss=(s<10?'0':'')+s;"
+        "return h>0 ? (h+':'+mm+':'+ss) : (mm+':'+ss);"
+        "}"
+        "function ensureAudio(){"
+        "if(!audioCtx){"
+        "var Ctx=window.AudioContext||window.webkitAudioContext;"
+        "if(Ctx) audioCtx=new Ctx();"
+        "}"
+        "if(audioCtx && audioCtx.state==='suspended') audioCtx.resume();"
+        "}"
+        "function ring(){"
+        "try{"
+        "if(audioCtx){"
+        "[0,0.35,0.7,1.05,1.4].forEach(function(t){"
+        "var o=audioCtx.createOscillator(), g=audioCtx.createGain();"
+        "o.type='square'; o.frequency.value=880;"
+        "g.gain.setValueAtTime(0.35, audioCtx.currentTime+t);"
+        "o.connect(g); g.connect(audioCtx.destination);"
+        "o.start(audioCtx.currentTime+t); o.stop(audioCtx.currentTime+t+0.25);"
+        "});"
+        "}"
+        "}catch(e){}"
+        "if(navigator.vibrate) navigator.vibrate([300,150,300,150,300]);"
+        "panel.hidden=false;"
+        "display.textContent=\"Time's up!\";"
+        "btn.classList.remove('running');"
+        "}"
+        "function tick(){"
+        "var remaining=(endTime-Date.now())/1000;"
+        "if(remaining<=0){"
+        "clearInterval(intervalId); intervalId=null; endTime=null;"
+        "ring();"
+        "return;"
+        "}"
+        "display.textContent=fmt(remaining);"
+        "}"
+        "function start(totalSeconds){"
+        "if(!(totalSeconds>0)) return;"
+        "ensureAudio();"
+        "endTime=Date.now()+totalSeconds*1000;"
+        "display.textContent=fmt(totalSeconds);"
+        "if(intervalId) clearInterval(intervalId);"
+        "intervalId=setInterval(tick,250);"
+        "btn.classList.add('running');"
+        "panel.hidden=false;"
+        "}"
+        "function cancelTimer(){"
+        "if(intervalId) clearInterval(intervalId);"
+        "intervalId=null; endTime=null;"
+        "display.textContent='00:00';"
+        "btn.classList.remove('running');"
+        "}"
+        "btn.addEventListener('click',function(){ panel.hidden=!panel.hidden; });"
+        "closeBtn.addEventListener('click',function(){ panel.hidden=true; });"
+        "cancelBtn.addEventListener('click',cancelTimer);"
+        "presetBtns.forEach(function(b){"
+        "b.addEventListener('click',function(){ start(parseFloat(b.dataset.min)*60); });"
+        "});"
+        "customBtn.addEventListener('click',function(){"
+        "var hrs=parseFloat(customHrInput.value)||0;"
+        "var mins=parseFloat(customMinInput.value)||0;"
+        "var secs=parseFloat(customSecInput.value)||0;"
+        "start(hrs*3600+mins*60+secs);"
         "});"
         "})();"
         "</script>"
@@ -1121,7 +1459,10 @@ class Handler(BaseHTTPRequestHandler):
                 page_num = max(1, int(query.get("page", ["1"])[0]))
             except ValueError:
                 page_num = 1
-            return self._send_html(render_home(page_num))
+            q = query.get("q", [""])[0].strip() or None
+            difficulty = query.get("difficulty", [""])[0].strip() or None
+            time_bucket = query.get("time", [""])[0].strip() or None
+            return self._send_html(render_home(page_num, q, difficulty, time_bucket))
         if parts == ["recipes", "new"]:
             return self._send_html(render_new_recipe_form())
         if parts == ["recommend"]:

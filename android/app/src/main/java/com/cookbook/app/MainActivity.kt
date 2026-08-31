@@ -2,8 +2,6 @@ package com.cookbook.app
 
 import android.content.Intent
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.view.Menu
 import android.view.MenuItem
 import android.view.WindowManager
@@ -14,9 +12,6 @@ import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import com.cookbook.app.databinding.ActivityMainBinding
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * The whole app is this one screen: a WebView pointed at the Cookbook
@@ -34,16 +29,6 @@ class MainActivity : AppCompatActivity() {
     // return from the Settings screen actually changed something (vs. just
     // switching apps and back) before reloading the WebView from scratch.
     private var loadedBaseUrl: String? = null
-
-    // "HH" is always 24-hour in SimpleDateFormat, regardless of locale.
-    private val clockFormat = SimpleDateFormat("EEEE MMM d - HH:mm:ss", Locale.getDefault())
-    private val clockHandler = Handler(Looper.getMainLooper())
-    private val clockTick = object : Runnable {
-        override fun run() {
-            supportActionBar?.title = clockFormat.format(Date()).uppercase(Locale.getDefault())
-            clockHandler.postDelayed(this, 1_000)
-        }
-    }
 
     // The cooking-mode deck (any /step/ URL) is meant to sit propped up on a
     // counter while your hands are busy — the screen timing out mid-recipe
@@ -73,6 +58,8 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setSupportActionBar(binding.toolbar)
+        supportActionBar?.title = "My Kitchen"
+        supportActionBar?.subtitle = "by Ned Nguyen"
 
         binding.webView.settings.javaScriptEnabled = true
         binding.webView.settings.domStorageEnabled = true
@@ -141,17 +128,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        clockHandler.post(clockTick)
         // Coming back from the Settings screen with a changed server/login
         // — reload against the new one instead of leaving the old page up.
         if (::binding.isInitialized && Config.baseUrl(this) != loadedBaseUrl) {
             loadServer()
         }
-    }
-
-    override fun onPause() {
-        clockHandler.removeCallbacks(clockTick)
-        super.onPause()
     }
 
     override fun onDestroy() {

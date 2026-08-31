@@ -14,7 +14,8 @@
         android:paddingTop="4dp"
         android:paddingBottom="10dp"
         android:background="@color/panel"
-        app:titleTextColor="@color/accent" />
+        app:titleTextColor="@color/accent"
+        app:subtitleTextColor="@color/text_dim" />
 
     <ProgressBar
         android:id="@+id/loadingBar"
