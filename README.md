@@ -80,6 +80,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/path/to/this/repo
 Environment=COOKBOOK_RECIPES_DIR=/path/to/your/recipes/folder
+Environment=COOKBOOK_PHOTOS_DIR=/path/to/your/photos/folder
 ExecStart=/usr/bin/python3 /path/to/this/repo/server.py
 Restart=always
 RestartSec=5
@@ -118,7 +119,10 @@ asking for one separately.
 
 Recipes live in `~/Documents/Cooking` (or wherever `COOKBOOK_RECIPES_DIR`
 points), not in this repo — they're your data, kept in sync however you
-like, not part of the app.
+like, not part of the app. Recipe photos live in a separate folder
+(`~/Documents/Cooking Photos` by default, or `COOKBOOK_PHOTOS_DIR`) — one
+subfolder per recipe, named by its slug — kept apart from the `.md` files
+on purpose rather than mixed in alongside them.
 
 ## Android app
 

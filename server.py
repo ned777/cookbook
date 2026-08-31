@@ -12,7 +12,9 @@ the page loads.
 
 The folder defaults to ~/Documents/Cooking; override it with the
 COOKBOOK_RECIPES_DIR environment variable (set in the systemd unit, not
-committed here) if your actual data lives somewhere else.
+committed here) if your actual data lives somewhere else. Recipe photos
+live in a separate folder (default ~/Documents/Cooking Photos, override
+with COOKBOOK_PHOTOS_DIR) rather than mixed in alongside the .md files.
 
 Run:  python3 server.py
 Serves on 0.0.0.0:8092, protected by HTTP Basic Auth.
@@ -612,36 +614,39 @@ def empty_trash():
 
 # --- Recipe photos -------------------------------------------------------
 # A recipe can carry a whole gallery of photos — "what it looked like this
-# time I cooked it" — not just one. Each is stored under
-# RECIPES_DIR/.photos/<slug>/, a dot-prefixed subfolder that
-# load_recipes()/_list_md_files() never look inside (same convention as
-# .trash), so this never gets mistaken for recipe content.
+# time I cooked it" — not just one. They live in a separate top-level
+# folder (PHOTOS_DIR, a sibling of RECIPES_DIR, not nested under it) so
+# they never get mixed in with the .md files on disk — one subfolder per
+# recipe, named by slug.
 #
-# The filename itself encodes when the photo was taken and how that time
-# was determined, so listing never needs to re-parse EXIF or hit the
-# filesystem's mtime: "exif_20260401_143000.jpg" (from the photo's own EXIF
-# DateTimeOriginal) vs "upload_20260401_143000.jpg" (no EXIF — e.g. a PNG,
-# a screenshot, or a camera app that stripped it — falls back to server
-# time at upload). Callers use the prefix to label it "Captured on" vs
-# "Uploaded on" without needing to remember which source it came from.
+# Each file is named after its own timestamp — the photo's EXIF
+# DateTimeOriginal when there is one, otherwise the moment it was uploaded
+# — so a folder listing sorts and reads sensibly on its own even outside
+# this app. That timestamp is re-derived live from the file itself at
+# listing time (EXIF if present, else mtime) rather than trusted from the
+# filename, so a photo dropped in or renamed by hand from any device still
+# labels correctly, the same "just read what's on disk" philosophy as
+# recipes themselves.
 
 PHOTO_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "gif")
 PHOTO_CONTENT_TYPES = {
     "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
     "webp": "image/webp", "gif": "image/gif",
 }
-PHOTOS_SUBDIR = ".photos"
-_PHOTO_FILENAME_RE = re.compile(r"^(exif|upload)_(\d{8}_\d{6})(?:_\d+)?\.([a-z]+)$")
+PHOTOS_DIR = os.environ.get(
+    "COOKBOOK_PHOTOS_DIR",
+    os.path.join(os.path.expanduser("~"), "Documents", "Cooking Photos"),
+)
 
 
 def _recipe_photos_dir(slug):
-    return os.path.join(RECIPES_DIR, PHOTOS_SUBDIR, slug)
+    return os.path.join(PHOTOS_DIR, slug)
 
 
 def list_recipe_photos(slug):
     """[{"filename", "when" (datetime), "source" ("exif"/"upload")}, ...]
     oldest first — everything the recipe page and Edit form need to render
-    the gallery, parsed straight out of each file's name."""
+    the gallery."""
     if not _valid_slug(slug):
         return []
     d = _recipe_photos_dir(slug)
@@ -649,17 +654,33 @@ def list_recipe_photos(slug):
         return []
     photos = []
     for name in os.listdir(d):
-        m = _PHOTO_FILENAME_RE.match(name)
-        if not m:
+        ext = os.path.splitext(name)[1].lstrip(".").lower()
+        if ext not in PHOTO_EXTENSIONS:
             continue
-        source, stamp, ext = m.groups()
-        try:
-            when = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
-        except ValueError:
-            continue
+        path = os.path.join(d, name)
+        captured = None
+        if ext in ("jpg", "jpeg"):
+            try:
+                with open(path, "rb") as f:
+                    captured = extract_jpeg_datetime(f.read())
+            except OSError:
+                captured = None
+        if captured is not None:
+            when, source = captured, "exif"
+        else:
+            when, source = datetime.fromtimestamp(os.path.getmtime(path)), "upload"
         photos.append({"filename": name, "when": when, "source": source})
     photos.sort(key=lambda p: p["when"])
     return photos
+
+
+def _unique_photo_name(directory, base, ext):
+    name = f"{base}.{ext}"
+    suffix = 2
+    while os.path.exists(os.path.join(directory, name)):
+        name = f"{base}_{suffix}.{ext}"
+        suffix += 1
+    return name
 
 
 def add_recipe_photo(slug, filename, data):
@@ -670,19 +691,11 @@ def add_recipe_photo(slug, filename, data):
         ext = "jpg"
     if ext not in PHOTO_EXTENSIONS:
         return
-    captured = extract_jpeg_datetime(data) if ext == "jpg" else None
-    source = "exif" if captured else "upload"
-    when = captured or datetime.now()
+    when = (extract_jpeg_datetime(data) if ext == "jpg" else None) or datetime.now()
 
     d = _recipe_photos_dir(slug)
     os.makedirs(d, exist_ok=True)
-    existing = set(os.listdir(d))
-    stamp = when.strftime("%Y%m%d_%H%M%S")
-    out_name = f"{source}_{stamp}.{ext}"
-    suffix = 2
-    while out_name in existing:
-        out_name = f"{source}_{stamp}_{suffix}.{ext}"
-        suffix += 1
+    out_name = _unique_photo_name(d, when.strftime("%Y-%m-%d_%H-%M-%S"), ext)
     with open(os.path.join(d, out_name), "wb") as f:
         f.write(data)
 
