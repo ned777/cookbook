@@ -587,8 +587,6 @@ body {
   margin: 0; background: var(--bg); color: var(--text);
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 16px; line-height: 1.6;
-  background-image: radial-gradient(ellipse 900px 500px at 15% -10%, var(--accent-soft), transparent 60%);
-  background-repeat: no-repeat;
 }
 h1, h2, h3 {
   font-family: 'Fraunces', Georgia, serif;
@@ -624,8 +622,8 @@ header.top a.back:hover { color: var(--text); }
   background: var(--surface-2); color: var(--text); transition: border-color 0.15s, transform 0.15s;
 }
 .btn:hover { border-color: var(--chrome); }
-.btn.primary { background: var(--gradient); border-color: transparent; color: #04211D; box-shadow: 0 6px 18px -8px var(--accent-2); }
-.btn.primary:hover { transform: translateY(-1px); box-shadow: 0 10px 22px -8px var(--accent-2); }
+.btn.primary { background: var(--gradient); border-color: transparent; color: #04211D; }
+.btn.primary:hover { transform: translateY(-1px); }
 .btn.danger { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); color: var(--danger); }
 .btn.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 
@@ -724,7 +722,7 @@ textarea { resize: vertical; min-height: 6em; }
   -webkit-appearance: none; appearance: none; font-family: inherit; cursor: pointer; margin: 0;
 }
 .step-arrow.disabled { opacity: 0.3; pointer-events: none; }
-.step-arrow.primary { background: var(--gradient); border-color: transparent; color: #04211D; box-shadow: 0 8px 22px -10px var(--accent-2); }
+.step-arrow.primary { background: var(--gradient); border-color: transparent; color: #04211D; }
 .step-arrow .lbl { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; margin-left: 0.5rem; font-family: 'Inter', sans-serif; font-weight: 700; }
 
 /* --- Cook-mode timer -------------------------------------------------- */
@@ -734,7 +732,7 @@ textarea { resize: vertical; min-height: 6em; }
   font-size: 1.2rem; display: flex; align-items: center; justify-content: center;
   cursor: pointer; -webkit-tap-highlight-color: transparent;
 }
-.timer-btn.running { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.timer-btn.running { border-color: var(--accent); }
 .timer-panel {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 900;
   background: var(--surface); border-top: 1px solid var(--border);
@@ -783,7 +781,7 @@ textarea { resize: vertical; min-height: 6em; }
 
 HEAD = (
     "<meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
-    "<title>Cookbook</title>"
+    "<title>My Kitchen</title>"
     "<link rel='icon' href=\"data:image/svg+xml,"
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
     "<text y='.9em' font-size='90'>%F0%9F%8D%B3</text></svg>\">"
@@ -903,7 +901,7 @@ def render_home(page_num=1, q=None, difficulty=None, time_bucket=None):
             f"<code>{html.escape(RECIPES_DIR)}</code>, or type one in.</p>"
             f"{top_actions}"
         )
-        return page("Cookbook", body)
+        return page("My Kitchen", body)
 
     search_bar = (
         f"<form class='search-bar' method='get' action='/'>"
@@ -943,7 +941,7 @@ def render_home(page_num=1, q=None, difficulty=None, time_bucket=None):
             + "<p class='empty'>No recipes match those filters.</p>"
             + new_recipe_btn
         )
-        return page("Cookbook", body)
+        return page("My Kitchen", body)
 
     total_pages = max(1, -(-len(recipes) // RECIPES_PER_PAGE))  # ceiling division
     page_num = max(1, min(page_num, total_pages))
@@ -999,7 +997,7 @@ def render_home(page_num=1, q=None, difficulty=None, time_bucket=None):
         )
 
     body = top_actions + search_bar + filter_bar + "".join(cards) + pager + new_recipe_btn
-    return page("Cookbook", body)
+    return page("My Kitchen", body)
 
 
 def render_recipe(slug):
@@ -1039,7 +1037,7 @@ def render_recipe(slug):
         f"{'<div class=\"section-title\">Ingredients</div>' + ''.join(groups_html) if groups_html else ''}"
         f"{''.join(notes_html)}"
     )
-    return page(r["title"], body, back_href="/", back_label="Cookbook")
+    return page(r["title"], body, back_href="/", back_label="My Kitchen")
 
 
 def render_step(slug, n):
@@ -1280,7 +1278,7 @@ def render_new_recipe_form():
         "<div class='actions'><button class='btn primary' type='submit'>Save recipe</button></div>"
         "</form>"
     )
-    return page("New Recipe", body, back_href="/", back_label="Cookbook")
+    return page("New Recipe", body, back_href="/", back_label="My Kitchen")
 
 
 def render_edit_form(slug):
@@ -1322,7 +1320,7 @@ def render_trash():
     trashed = load_trash()
     if not trashed:
         body = "<p class='empty'>Trash is empty.</p>"
-        return page("Trash", body, back_href="/", back_label="Cookbook")
+        return page("Trash", body, back_href="/", back_label="My Kitchen")
 
     cards = []
     for r in trashed:
@@ -1357,7 +1355,7 @@ def render_trash():
         "back, or delete forever to remove it for good.</p>"
         f"{empty_btn}{''.join(cards)}"
     )
-    return page("Trash", body, back_href="/", back_label="Cookbook")
+    return page("Trash", body, back_href="/", back_label="My Kitchen")
 
 
 def render_recommend(have_text=""):
@@ -1400,7 +1398,7 @@ def render_recommend(have_text=""):
                 )
             body += f"<div class='section-title'>Closest matches</div>{''.join(result_cards)}"
 
-    return page("What Can I Make?", body, back_href="/", back_label="Cookbook")
+    return page("What Can I Make?", body, back_href="/", back_label="My Kitchen")
 
 
 # --- HTTP handler ------------------------------------------------------------
@@ -1416,7 +1414,7 @@ class Handler(BaseHTTPRequestHandler):
         expected = "Basic " + base64.b64encode(f"{AUTH_USER}:{AUTH_PASS}".encode()).decode()
         if header != expected:
             self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Basic realm="Cookbook"')
+            self.send_header("WWW-Authenticate", 'Basic realm="My Kitchen"')
             self.send_header("Content-Length", "0")
             self.end_headers()
             return False
@@ -1438,7 +1436,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _not_found(self):
-        self._send_html(page("Not Found", "<p class='empty'>Nothing here.</p>", back_href="/", back_label="Cookbook"), status=404)
+        self._send_html(page("Not Found", "<p class='empty'>Nothing here.</p>", back_href="/", back_label="My Kitchen"), status=404)
 
     def _read_form(self):
         length = int(self.headers.get("Content-Length", 0))
