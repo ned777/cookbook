@@ -23,7 +23,9 @@ import html
 import json
 import os
 import re
+import struct
 import unicodedata
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse, quote, unquote
 
@@ -599,7 +601,7 @@ def delete_forever(slug):
     if not os.path.isfile(path):
         return False
     os.remove(path)
-    delete_recipe_photo(slug)
+    delete_all_recipe_photos(slug)
     return True
 
 
@@ -608,29 +610,59 @@ def empty_trash():
         os.remove(os.path.join(TRASH_DIR, name))
 
 
-# --- Recipe photo -------------------------------------------------------
-# One optional photo per recipe, stored as <slug>.<ext> right next to
-# <slug>.md in RECIPES_DIR — load_recipes()/_list_md_files() only ever look
-# at .md files, so these sit there invisibly as far as recipe listing goes.
-# No separate metadata needed: the slug is the join key.
+# --- Recipe photos -------------------------------------------------------
+# A recipe can carry a whole gallery of photos — "what it looked like this
+# time I cooked it" — not just one. Each is stored under
+# RECIPES_DIR/.photos/<slug>/, a dot-prefixed subfolder that
+# load_recipes()/_list_md_files() never look inside (same convention as
+# .trash), so this never gets mistaken for recipe content.
+#
+# The filename itself encodes when the photo was taken and how that time
+# was determined, so listing never needs to re-parse EXIF or hit the
+# filesystem's mtime: "exif_20260401_143000.jpg" (from the photo's own EXIF
+# DateTimeOriginal) vs "upload_20260401_143000.jpg" (no EXIF — e.g. a PNG,
+# a screenshot, or a camera app that stripped it — falls back to server
+# time at upload). Callers use the prefix to label it "Captured on" vs
+# "Uploaded on" without needing to remember which source it came from.
 
 PHOTO_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "gif")
 PHOTO_CONTENT_TYPES = {
     "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
     "webp": "image/webp", "gif": "image/gif",
 }
+PHOTOS_SUBDIR = ".photos"
+_PHOTO_FILENAME_RE = re.compile(r"^(exif|upload)_(\d{8}_\d{6})(?:_\d+)?\.([a-z]+)$")
 
 
-def find_recipe_photo(slug):
+def _recipe_photos_dir(slug):
+    return os.path.join(RECIPES_DIR, PHOTOS_SUBDIR, slug)
+
+
+def list_recipe_photos(slug):
+    """[{"filename", "when" (datetime), "source" ("exif"/"upload")}, ...]
+    oldest first — everything the recipe page and Edit form need to render
+    the gallery, parsed straight out of each file's name."""
     if not _valid_slug(slug):
-        return None
-    for ext in PHOTO_EXTENSIONS:
-        if os.path.isfile(os.path.join(RECIPES_DIR, f"{slug}.{ext}")):
-            return f"{slug}.{ext}"
-    return None
+        return []
+    d = _recipe_photos_dir(slug)
+    if not os.path.isdir(d):
+        return []
+    photos = []
+    for name in os.listdir(d):
+        m = _PHOTO_FILENAME_RE.match(name)
+        if not m:
+            continue
+        source, stamp, ext = m.groups()
+        try:
+            when = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+        except ValueError:
+            continue
+        photos.append({"filename": name, "when": when, "source": source})
+    photos.sort(key=lambda p: p["when"])
+    return photos
 
 
-def save_recipe_photo(slug, filename, data):
+def add_recipe_photo(slug, filename, data):
     if not data or not _valid_slug(slug):
         return
     ext = os.path.splitext(filename)[1].lstrip(".").lower()
@@ -638,18 +670,112 @@ def save_recipe_photo(slug, filename, data):
         ext = "jpg"
     if ext not in PHOTO_EXTENSIONS:
         return
-    delete_recipe_photo(slug)  # drop any old photo under a different extension
-    with open(os.path.join(RECIPES_DIR, f"{slug}.{ext}"), "wb") as f:
+    captured = extract_jpeg_datetime(data) if ext == "jpg" else None
+    source = "exif" if captured else "upload"
+    when = captured or datetime.now()
+
+    d = _recipe_photos_dir(slug)
+    os.makedirs(d, exist_ok=True)
+    existing = set(os.listdir(d))
+    stamp = when.strftime("%Y%m%d_%H%M%S")
+    out_name = f"{source}_{stamp}.{ext}"
+    suffix = 2
+    while out_name in existing:
+        out_name = f"{source}_{stamp}_{suffix}.{ext}"
+        suffix += 1
+    with open(os.path.join(d, out_name), "wb") as f:
         f.write(data)
 
 
-def delete_recipe_photo(slug):
-    if not _valid_slug(slug):
+def delete_recipe_photo(slug, filename):
+    if not _valid_slug(slug) or not filename or filename != os.path.basename(filename):
         return
-    for ext in PHOTO_EXTENSIONS:
-        path = os.path.join(RECIPES_DIR, f"{slug}.{ext}")
-        if os.path.isfile(path):
-            os.remove(path)
+    path = os.path.join(_recipe_photos_dir(slug), filename)
+    if os.path.isfile(path):
+        os.remove(path)
+
+
+def delete_all_recipe_photos(slug):
+    d = _recipe_photos_dir(slug)
+    if not os.path.isdir(d):
+        return
+    for name in os.listdir(d):
+        os.remove(os.path.join(d, name))
+    os.rmdir(d)
+
+
+def extract_jpeg_datetime(data):
+    """Best-effort EXIF DateTimeOriginal (falling back to the plain
+    DateTime tag) out of a JPEG's APP1 segment — hand-rolled since this
+    server has no dependency on Pillow/exifread. Returns None for
+    non-JPEG data, missing/unparseable EXIF, or a corrupt segment; callers
+    fall back to the upload time whenever this returns None."""
+    try:
+        if data[0:2] != b"\xff\xd8":
+            return None
+        pos = 2
+        exif_body = None
+        while pos + 4 <= len(data):
+            if data[pos] != 0xFF:
+                break
+            marker = data[pos + 1]
+            if marker == 0xD8 or 0xD0 <= marker <= 0xD9:
+                pos += 2
+                continue
+            if marker == 0xDA:  # Start of Scan — compressed image data follows
+                break
+            seg_len = (data[pos + 2] << 8) | data[pos + 3]
+            if marker == 0xE1 and data[pos + 4:pos + 10] == b"Exif\x00\x00":
+                exif_body = data[pos + 10:pos + 2 + seg_len]
+                break
+            pos += 2 + seg_len
+        if not exif_body or len(exif_body) < 8:
+            return None
+
+        endian = exif_body[0:2]
+        fmt = "<" if endian == b"II" else ">" if endian == b"MM" else None
+        if fmt is None:
+            return None
+
+        def u16(off):
+            return struct.unpack(fmt + "H", exif_body[off:off + 2])[0]
+
+        def u32(off):
+            return struct.unpack(fmt + "I", exif_body[off:off + 4])[0]
+
+        def read_ifd(offset):
+            count = u16(offset)
+            entries = {}
+            for i in range(count):
+                entry_off = offset + 2 + i * 12
+                tag = u16(entry_off)
+                num = u32(entry_off + 4)
+                value_off = entry_off + 8
+                entries[tag] = (num, value_off)
+            return entries
+
+        def get_ascii(entries, tag):
+            if tag not in entries:
+                return None
+            num, value_off = entries[tag]
+            raw = exif_body[value_off:value_off + num] if num <= 4 else exif_body[u32(value_off):u32(value_off) + num]
+            return raw.split(b"\x00")[0].decode("ascii", "ignore")
+
+        ifd0 = read_ifd(u32(4))
+        exif_ifd_ptr = ifd0.get(0x8769)
+        if exif_ifd_ptr is not None:
+            _num, value_off = exif_ifd_ptr
+            sub_ifd = read_ifd(u32(value_off))
+            text = get_ascii(sub_ifd, 0x9003)  # DateTimeOriginal
+            if text:
+                return datetime.strptime(text, "%Y:%m:%d %H:%M:%S")
+
+        text = get_ascii(ifd0, 0x0132)  # plain DateTime, IFD0-level fallback
+        if text:
+            return datetime.strptime(text, "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        return None
+    return None
 
 
 def _parse_multipart(body, content_type_header):
@@ -878,27 +1004,61 @@ textarea { resize: vertical; min-height: 6em; }
 .confirm-box p { margin: 0 0 1.2rem; font-size: 0.98rem; line-height: 1.5; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 0.6rem; }
 
-/* --- Recipe photo + lightbox -------------------------------------------- */
-.recipe-photo {
-  display: block; width: 100%; max-height: 260px; object-fit: cover;
-  border-radius: 16px; margin: 0 0 1rem; cursor: zoom-in; border: 1px solid var(--border);
+/* --- Recipe photos: teaser grid, full list, lightbox -------------------- */
+.recipe-photo { cursor: zoom-in; display: block; }
+.photo-grid { display: grid; grid-template-columns: 1fr; gap: 0.5rem; margin-bottom: 1.1rem; }
+.photo-grid[data-count="2"], .photo-grid[data-count="3"], .photo-grid[data-count="4plus"] {
+  grid-template-columns: 1fr 1fr;
 }
+.photo-tile {
+  position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--border);
+}
+.photo-grid[data-count="1"] .photo-tile { height: 260px; }
+.photo-grid[data-count="2"] .photo-tile,
+.photo-grid[data-count="3"] .photo-tile,
+.photo-grid[data-count="4plus"] .photo-tile { height: 160px; }
+.photo-tile img.recipe-photo { width: 100%; height: 100%; object-fit: cover; }
+.photo-tile.see-more { cursor: pointer; }
+.photo-tile.see-more .see-more-label {
+  position: absolute; inset: 0; background: rgba(0, 0, 0, 0.55); color: #fff;
+  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.95rem;
+}
+.photo-list { display: flex; flex-direction: column; gap: 1rem; margin: 1rem 0; }
+.photo-list-item img.recipe-photo {
+  width: 100%; max-height: 320px; object-fit: cover; border-radius: 14px; border: 1px solid var(--border);
+}
+.photo-list-caption { color: var(--text-dim); font-size: 0.85rem; margin-top: 0.4rem; }
+.photo-list-item form { margin-top: 0.5rem; }
+
 .photo-lightbox {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.9); z-index: 1100;
   display: flex; align-items: center; justify-content: center; padding: 1.5rem;
   overflow: auto;
 }
 .photo-lightbox[hidden] { display: none; }
-.photo-lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }
+.photo-lightbox-content { display: flex; flex-direction: column; align-items: center; gap: 0.7rem; max-width: 100%; }
+.photo-lightbox-content img { max-width: 100%; max-height: 75vh; border-radius: 8px; }
+.photo-lightbox-caption { color: var(--text-dim); font-size: 0.9rem; text-align: center; }
 .photo-lightbox-close {
   position: fixed; top: 1rem; right: 1rem; z-index: 1101;
   width: 42px; height: 42px; border-radius: 50%; border: 1px solid var(--border);
   background: var(--surface); color: var(--text); font-size: 1.2rem;
   display: flex; align-items: center; justify-content: center; cursor: pointer;
 }
+.photo-lightbox-arrow {
+  position: fixed; top: 50%; transform: translateY(-50%); z-index: 1101;
+  width: 46px; height: 46px; border-radius: 50%; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 1.3rem;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.photo-lightbox-arrow[hidden] { display: none; }
+.photo-lightbox-prev { left: 1rem; }
+.photo-lightbox-next { right: 1rem; }
+
 .photo-field-preview {
   display: block; max-width: 100%; max-height: 200px; border-radius: 10px;
   margin-top: 0.6rem; border: 1px solid var(--border);
+  object-fit: contain; align-self: flex-start;
 }
 
 /* --- Step viewer: full-black flashcard deck, swipe/arrow between cards -- */
@@ -1030,29 +1190,63 @@ CONFIRM_MODAL = (
 )
 
 
-# Tapping a recipe photo opens it full-size in this overlay — closes either
-# on the explicit X button or a tap anywhere outside the image itself
-# (clicking the image resizes/pans via native pinch-zoom instead of
-# closing). Shared by every recipe page the same way CONFIRM_MODAL is.
+# Tapping any photo on the page opens it full-size here, with the date/time
+# caption underneath and Prev/Next to step through every other photo on
+# that same page (its own click-to-open list — the recipe page's teaser
+# grid, the full /photos gallery, and the Edit form's management list each
+# get an independent Prev/Next range this way, in DOM/newest-first order).
+# Closes via the X button, a tap outside the image, arrow keys, or swipe.
 PHOTO_LIGHTBOX = (
     "<div class='photo-lightbox' id='photoLightbox' hidden>"
     "<button type='button' class='photo-lightbox-close' id='photoLightboxClose' aria-label='Close'>&times;</button>"
+    "<button type='button' class='photo-lightbox-arrow photo-lightbox-prev' id='photoLightboxPrev' aria-label='Previous photo'>&larr;</button>"
+    "<div class='photo-lightbox-content'>"
     "<img id='photoLightboxImg' src='' alt=''>"
+    "<div class='photo-lightbox-caption' id='photoLightboxCaption'></div>"
+    "</div>"
+    "<button type='button' class='photo-lightbox-arrow photo-lightbox-next' id='photoLightboxNext' aria-label='Next photo'>&rarr;</button>"
     "</div>"
     "<script>"
     "(function(){"
     "var overlay=document.getElementById('photoLightbox');"
     "var img=document.getElementById('photoLightboxImg');"
+    "var caption=document.getElementById('photoLightboxCaption');"
     "var closeBtn=document.getElementById('photoLightboxClose');"
-    "document.querySelectorAll('.recipe-photo').forEach(function(thumb){"
-    "thumb.addEventListener('click',function(){"
-    "img.src=thumb.src; overlay.hidden=false;"
-    "});"
+    "var prevBtn=document.getElementById('photoLightboxPrev');"
+    "var nextBtn=document.getElementById('photoLightboxNext');"
+    "var thumbs=Array.prototype.slice.call(document.querySelectorAll('.recipe-photo[data-caption]'));"
+    "var idx=0;"
+    "function show(i){"
+    "if(!thumbs.length) return;"
+    "idx=Math.max(0,Math.min(i,thumbs.length-1));"
+    "img.src=thumbs[idx].src;"
+    "caption.textContent=thumbs[idx].getAttribute('data-caption')||'';"
+    "prevBtn.hidden=idx===0;"
+    "nextBtn.hidden=idx===thumbs.length-1;"
+    "}"
+    "thumbs.forEach(function(thumb,i){"
+    "thumb.addEventListener('click',function(){ show(i); overlay.hidden=false; });"
     "});"
     "overlay.addEventListener('click',function(e){"
     "if(e.target===overlay){ overlay.hidden=true; }"
     "});"
     "closeBtn.addEventListener('click',function(){ overlay.hidden=true; });"
+    "prevBtn.addEventListener('click',function(){ show(idx-1); });"
+    "nextBtn.addEventListener('click',function(){ show(idx+1); });"
+    "document.addEventListener('keydown',function(e){"
+    "if(overlay.hidden) return;"
+    "if(e.key==='ArrowLeft') show(idx-1);"
+    "else if(e.key==='ArrowRight') show(idx+1);"
+    "else if(e.key==='Escape') overlay.hidden=true;"
+    "});"
+    "var sx=null;"
+    "overlay.addEventListener('touchstart',function(e){ sx=e.changedTouches[0].clientX; },{passive:true});"
+    "overlay.addEventListener('touchend',function(e){"
+    "if(sx===null) return;"
+    "var dx=e.changedTouches[0].clientX-sx;"
+    "if(Math.abs(dx)>50){ if(dx<0) show(idx+1); else show(idx-1); }"
+    "sx=null;"
+    "},{passive:true});"
     "})();"
     "</script>"
 )
@@ -1139,21 +1333,13 @@ def _meta_fields_html(prep_time="", cook_time="", difficulty=""):
     )
 
 
-def _photo_field_html(existing_photo_url=None):
-    preview_hidden = "" if existing_photo_url else " hidden"
-    remove_checkbox = (
-        "<label class='checkbox-label'>"
-        "<input type='checkbox' name='remove_photo' value='1'> Remove current photo"
-        "</label>"
-        if existing_photo_url else ""
-    )
+def _photo_field_html():
     return (
-        "<label>Photo (optional)"
+        "<label>Add Photo (optional)"
         "<input type='file' name='photo' id='photoInput' accept='image/*'>"
-        f"<img id='photoFieldPreview' class='photo-field-preview'{preview_hidden} "
-        f"src='{html.escape(existing_photo_url or '')}' alt=''>"
+        "<img id='photoFieldPreview' class='photo-field-preview' hidden src='' alt=''>"
+        "<span class='hint'>Add one anytime you cook this — they build into a dated gallery on the recipe page.</span>"
         "</label>"
-        f"{remove_checkbox}"
     )
 
 
@@ -1368,6 +1554,91 @@ def render_home(page_num=1, q=None, difficulty=None, time_bucket=None):
     return page(None, body)
 
 
+def _format_photo_label(when, source):
+    verb = "Captured" if source == "exif" else "Uploaded"
+    return f"{verb} on {when.strftime('%Y-%b-%d')} {when.strftime('%H:%M')}"
+
+
+def _photo_grid_html(slug, photos):
+    """Teaser grid at the top of the recipe page: one big photo, two side
+    by side, three wrapping to a second row, or — four or more — the
+    newest 3 plus a square 'See more' tile linking to the full gallery.
+    Newest first, since that's the one you actually opened this page to
+    check against what's in the pan right now."""
+    if not photos:
+        return ""
+    newest_first = list(reversed(photos))
+    slug_q = quote(slug, safe="")
+    count = len(newest_first)
+    count_key = {1: "1", 2: "2", 3: "3"}.get(count, "4plus")
+    shown = newest_first[:3] if count >= 4 else newest_first
+
+    tiles = []
+    for p in shown:
+        label = html.escape(_format_photo_label(p["when"], p["source"]))
+        filename_q = quote(p["filename"], safe="")
+        tiles.append(
+            "<div class='photo-tile'>"
+            f"<img class='recipe-photo' src='/recipe/{slug_q}/photo/{filename_q}' data-caption='{label}' alt=''>"
+            "</div>"
+        )
+    if count >= 4:
+        tiles.append(
+            f"<a class='photo-tile see-more' href='/recipe/{slug_q}/photos'>"
+            "<span class='see-more-label'>See more</span></a>"
+        )
+    return f"<div class='photo-grid' data-count='{count_key}'>{''.join(tiles)}</div>"
+
+
+def render_photos_page(slug):
+    r = load_recipe(slug)
+    if r is None:
+        return None
+    slug_q = quote(slug, safe="")
+    photos = list(reversed(list_recipe_photos(slug)))
+    if not photos:
+        body = "<p class='empty'>No photos yet.</p>"
+    else:
+        items = []
+        for p in photos:
+            label = html.escape(_format_photo_label(p["when"], p["source"]))
+            filename_q = quote(p["filename"], safe="")
+            items.append(
+                "<div class='photo-list-item'>"
+                f"<img class='recipe-photo' src='/recipe/{slug_q}/photo/{filename_q}' data-caption='{label}' alt=''>"
+                f"<div class='photo-list-caption'>{label}</div>"
+                "</div>"
+            )
+        body = f"<div class='photo-list'>{''.join(items)}</div>"
+    return page(f"Photos — {r['title']}", body, back_href=f"/recipe/{slug_q}", back_label=r["title"])
+
+
+def _photo_manage_html(slug, photos):
+    """The Edit form's existing-photos section — same list styling as the
+    full gallery page, but each photo also gets its own Delete button."""
+    if not photos:
+        return ""
+    ordered = list(reversed(photos))
+    slug_q = quote(slug, safe="")
+    items = []
+    for p in ordered:
+        label = html.escape(_format_photo_label(p["when"], p["source"]))
+        filename_q = quote(p["filename"], safe="")
+        delete_msg = html.escape("Delete this photo? This can't be undone.")
+        items.append(
+            "<div class='photo-list-item'>"
+            f"<img class='recipe-photo' src='/recipe/{slug_q}/photo/{filename_q}' data-caption='{label}' alt=''>"
+            f"<div class='photo-list-caption'>{label}</div>"
+            f"<form method='post' action='/recipe/{slug_q}/photo/delete'>"
+            f"<input type='hidden' name='filename' value='{html.escape(p['filename'])}'>"
+            f"<button type='submit' class='btn danger' data-confirm='{delete_msg}' "
+            f"onclick='return confirmAction(this.form, this.dataset.confirm)'>Delete photo</button>"
+            f"</form>"
+            "</div>"
+        )
+    return f"<div class='hint'>Existing photos</div><div class='photo-list'>{''.join(items)}</div>"
+
+
 def render_recipe(slug):
     r = load_recipe(slug)
     if r is None:
@@ -1399,10 +1670,7 @@ def render_recipe(slug):
         f"</div>"
     )
 
-    photo_html = (
-        f"<img class='recipe-photo' src='/recipe/{slug_q}/photo' alt=''>"
-        if find_recipe_photo(r["slug"]) else ""
-    )
+    photo_html = _photo_grid_html(r["slug"], list_recipe_photos(r["slug"]))
 
     body = (
         f"{photo_html}"
@@ -1645,7 +1913,6 @@ def render_new_recipe_form():
     body = (
         "<form class='stack' method='post' action='/recipes/new' enctype='multipart/form-data'>"
         "<label>Title<input name='title' placeholder='Grandma’s Fried Rice' required></label>"
-        + _photo_field_html()
         + _meta_fields_html()
         + _list_builder_field(
             "ingredients", "Ingredients", "e.g. 2 cups jasmine rice", "Add",
@@ -1657,7 +1924,8 @@ def render_new_recipe_form():
         )
         + "<label>Summary (optional)<textarea name='summary' placeholder='A quick one-pan weeknight fried rice with whatever vegetables are in the fridge.'></textarea>"
         "<span class='hint'>Timing, notes, anything else worth knowing before you start. Shown at the top of the recipe.</span></label>"
-        "<div class='actions'><button class='btn primary' type='submit'>Save recipe</button></div>"
+        + _photo_field_html()
+        + "<div class='actions'><button class='btn primary' type='submit'>Save recipe</button></div>"
         "</form>"
         + LIST_BUILDER_SCRIPT
         + PHOTO_FIELD_SCRIPT
@@ -1690,14 +1958,13 @@ def render_edit_form(slug):
 
     delete_msg = html.escape(f'Move "{r["title"]}" to trash? You can restore it later.')
 
-    existing_photo_url = f"/recipe/{slug_q}/photo" if find_recipe_photo(slug) else None
+    photos = list_recipe_photos(slug)
 
     body = (
         f"<form class='stack' method='post' action='/recipe/{slug_q}/edit' "
         f"enctype='multipart/form-data' "
         f"onsubmit='return confirmAction(this, \"Save changes to this recipe?\")'>"
         f"<label>Title<input name='title' value='{title}' required></label>"
-        + _photo_field_html(existing_photo_url)
         + _meta_fields_html(
             prep_time=r["meta"]["prep_time"] or "",
             cook_time=r["meta"]["cook_time"] or "",
@@ -1714,7 +1981,9 @@ def render_edit_form(slug):
         )
         + f"<label>Summary (optional)<textarea name='summary'>{summary}</textarea>"
         f"<span class='hint'>Timing, notes, anything else worth knowing before you start. Shown at the top of the recipe.</span></label>"
-        f"<div class='actions'>"
+        + _photo_field_html()
+        + _photo_manage_html(slug, photos)
+        + f"<div class='actions'>"
         f"<button class='btn primary' type='submit'>Save changes</button>"
         f"<a class='btn' href='/recipe/{slug_q}'>Cancel</a>"
         f"</div>"
@@ -1890,11 +2159,16 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "edit":
             out = render_edit_form(parts[1])
             return self._send_html(out) if out else self._not_found()
-        if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "photo":
-            filename = find_recipe_photo(parts[1])
-            if filename is None:
+        if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "photos":
+            out = render_photos_page(parts[1])
+            return self._send_html(out) if out else self._not_found()
+        if len(parts) == 4 and parts[0] == "recipe" and parts[2] == "photo":
+            slug, filename = parts[1], parts[3]
+            if not _valid_slug(slug) or filename != os.path.basename(filename):
                 return self._not_found()
-            path = os.path.join(RECIPES_DIR, filename)
+            path = os.path.join(_recipe_photos_dir(slug), filename)
+            if not os.path.isfile(path):
+                return self._not_found()
             ext = os.path.splitext(filename)[1].lstrip(".").lower()
             with open(path, "rb") as f:
                 data = f.read()
@@ -1938,7 +2212,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             photo = self.uploaded_files.get("photo")
             if photo and photo[0]:
-                save_recipe_photo(slug, photo[0], photo[1])
+                add_recipe_photo(slug, photo[0], photo[1])
             return self._redirect(f"/recipe/{quote(slug, safe='')}")
 
         if parts == ["recommend"]:
@@ -1958,10 +2232,15 @@ class Handler(BaseHTTPRequestHandler):
             )
             photo = self.uploaded_files.get("photo")
             if photo and photo[0]:
-                save_recipe_photo(slug, photo[0], photo[1])
-            elif form.get("remove_photo"):
-                delete_recipe_photo(slug)
+                add_recipe_photo(slug, photo[0], photo[1])
             return self._redirect(f"/recipe/{quote(slug, safe='')}") if ok else self._not_found()
+
+        if len(parts) == 4 and parts[0] == "recipe" and parts[2] == "photo" and parts[3] == "delete":
+            # Trailing "-delete" would collide with a legitimately weird
+            # filename, so this is /recipe/<slug>/photo/delete with the
+            # filename as a form field instead of a path segment.
+            delete_recipe_photo(parts[1], form.get("filename", ""))
+            return self._redirect(f"/recipe/{quote(parts[1], safe='')}/edit")
 
         if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "delete":
             trash_recipe(parts[1])
