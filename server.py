@@ -2041,7 +2041,7 @@ def render_edit_form(slug):
         f"<div class='actions'>"
         f"<form method='post' action='/recipe/{slug_q}/delete'>"
         f"<button type='submit' class='btn danger' data-confirm='{delete_msg}' "
-        f"onclick='return confirmAction(this.form, this.dataset.confirm)'>Delete</button>"
+        f"onclick='return confirmAction(this.form, this.dataset.confirm)'>Delete Recipe</button>"
         f"</form>"
         f"</div>"
     )
