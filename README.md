@@ -12,9 +12,7 @@ whatever) shows up the next time the page loads. New recipes can also be
 typed straight into the app, which writes the same kind of Markdown file
 back into that folder.
 
-Same philosophy as this author's other self-hosted tools
-([Vehicle Maintenance Record](https://github.com/ned777/vehicle-maintenance)
-being the closest relative): a single Python file using only
+A single Python file using only
 `http.server`, nothing to `pip install`, nothing to break on a Python
 update.
 
