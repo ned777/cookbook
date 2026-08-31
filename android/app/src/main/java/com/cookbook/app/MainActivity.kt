@@ -1,8 +1,11 @@
 package com.cookbook.app
 
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Menu
+import android.view.MenuItem
 import android.view.WindowManager
 import android.webkit.HttpAuthHandler
 import android.webkit.WebSettings
@@ -26,6 +29,11 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+
+    // Tracks which server URL is currently loaded so onResume() can tell a
+    // return from the Settings screen actually changed something (vs. just
+    // switching apps and back) before reloading the WebView from scratch.
+    private var loadedBaseUrl: String? = null
 
     // "HH" is always 24-hour in SimpleDateFormat, regardless of locale.
     private val clockFormat = SimpleDateFormat("EEEE MMM d - HH:mm:ss", Locale.getDefault())
@@ -55,6 +63,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        if (!Config.isConfigured(this)) {
+            startActivity(Intent(this, SetupActivity::class.java).putExtra(SetupActivity.EXTRA_FIRST_RUN, true))
+            finish()
+            return
+        }
+
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setSupportActionBar(binding.toolbar)
@@ -73,7 +88,7 @@ class MainActivity : AppCompatActivity() {
                 host: String,
                 realm: String
             ) {
-                handler.proceed(Config.USERNAME, Config.PASSWORD)
+                handler.proceed(Config.username(this@MainActivity), Config.password(this@MainActivity))
             }
 
             override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
@@ -90,7 +105,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.swipeRefresh.setOnRefreshListener { binding.webView.reload() }
 
-        binding.webView.loadUrl(Config.BASE_URL)
+        loadServer()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -105,9 +120,33 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun loadServer() {
+        val url = Config.baseUrl(this) ?: return
+        loadedBaseUrl = url
+        binding.webView.loadUrl(url)
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.main_menu, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == R.id.action_settings) {
+            startActivity(Intent(this, SetupActivity::class.java))
+            return true
+        }
+        return super.onOptionsItemSelected(item)
+    }
+
     override fun onResume() {
         super.onResume()
         clockHandler.post(clockTick)
+        // Coming back from the Settings screen with a changed server/login
+        // — reload against the new one instead of leaving the old page up.
+        if (::binding.isInitialized && Config.baseUrl(this) != loadedBaseUrl) {
+            loadServer()
+        }
     }
 
     override fun onPause() {
@@ -116,7 +155,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        binding.webView.destroy()
+        if (::binding.isInitialized) {
+            binding.webView.destroy()
+        }
         super.onDestroy()
     }
 }

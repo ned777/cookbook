@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="28dp"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name"
+            android:textColor="@color/accent"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Connect to your Cookbook server"
+            android:textColor="@color/text_dim"
+            android:textSize="14sp"
+            android:layout_marginBottom="24dp" />
+
+        <EditText
+            android:id="@+id/serverInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Server address, e.g. 192.168.1.5:8092"
+            android:inputType="textUri"
+            android:textColor="@color/text"
+            android:textColorHint="@color/text_dim"
+            android:backgroundTint="@color/accent"
+            android:layout_marginBottom="16dp" />
+
+        <EditText
+            android:id="@+id/usernameInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Username"
+            android:inputType="text"
+            android:textColor="@color/text"
+            android:textColorHint="@color/text_dim"
+            android:backgroundTint="@color/accent"
+            android:layout_marginBottom="16dp" />
+
+        <EditText
+            android:id="@+id/passwordInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Password"
+            android:inputType="textPassword"
+            android:textColor="@color/text"
+            android:textColorHint="@color/text_dim"
+            android:backgroundTint="@color/accent"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:id="@+id/errorText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="@color/danger"
+            android:textSize="13sp"
+            android:visibility="gone"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="These must already exist on the server (local_secrets.py) — this screen just tells the app where to find it and how to log in, so a lost/reinstalled phone never needs a rebuild from source."
+            android:textColor="@color/text_dim"
+            android:textSize="12sp"
+            android:layout_marginBottom="24dp" />
+
+        <Button
+            android:id="@+id/saveButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Save and Connect"
+            android:backgroundTint="@color/accent"
+            android:textColor="#04211D" />
+
+        <Button
+            android:id="@+id/cancelButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Cancel"
+            android:layout_marginTop="8dp"
+            android:background="@android:color/transparent"
+            android:textColor="@color/text_dim"
+            android:visibility="gone" />
+
+    </LinearLayout>
+</ScrollView>

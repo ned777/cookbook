@@ -11,25 +11,25 @@
         <!-- Skillet body -->
         <path
             android:pathData="M28,64 m-24,0 a24,24 0 1,0 48,0 a24,24 0 1,0 -48,0"
-            android:strokeColor="#F2994A"
+            android:strokeColor="#2DD4BF"
             android:strokeWidth="6"
             android:fillColor="#00000000" />
         <!-- Handle -->
         <path
             android:pathData="M50,64 L86,50"
-            android:strokeColor="#F2994A"
+            android:strokeColor="#2DD4BF"
             android:strokeWidth="8"
             android:strokeLineCap="round" />
         <!-- Steam -->
         <path
             android:pathData="M18,28 q-5,-9 0,-18 q5,-9 0,-18"
-            android:strokeColor="#FFAD66"
+            android:strokeColor="#38BDF8"
             android:strokeWidth="4"
             android:strokeLineCap="round"
             android:fillColor="#00000000" />
         <path
             android:pathData="M32,24 q-5,-9 0,-18 q5,-9 0,-18"
-            android:strokeColor="#FFAD66"
+            android:strokeColor="#38BDF8"
             android:strokeWidth="4"
             android:strokeLineCap="round"
             android:fillColor="#00000000" />

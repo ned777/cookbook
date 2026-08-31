@@ -48,6 +48,7 @@ except ImportError:
 STEP_HEADING_RE = re.compile(r"^step\s*\d+\b[:.]?\s*", re.IGNORECASE)
 INGREDIENT_WORD_RE = re.compile(r"ingredient", re.IGNORECASE)
 INSTRUCTION_WORD_RE = re.compile(r"instruction|direction|method|preparation|how to make", re.IGNORECASE)
+NOTES_WORD_RE = re.compile(r"notes?\b|tips?\b|nutrition|faq", re.IGNORECASE)
 BULLET_RE = re.compile(r"^[-*]\s+(.*)")
 NUMBERED_RE = re.compile(r"^\d+[.)]\s+(.*)")
 
@@ -144,7 +145,11 @@ def split_numbered_steps(lines):
     return steps
 
 
-def parse_recipe(text):
+def split_sections(text):
+    """Shared front end for parse_recipe, extract_editable_summary, and
+    extract_raw_steps: pulls the title (H1) off, then splits everything
+    else into (heading, body_lines) chunks on '## ' headings — everything
+    before the first one is the intro (byline, description, meta line)."""
     lines = text.replace("\r\n", "\n").split("\n")
 
     title = "Untitled Recipe"
@@ -152,8 +157,6 @@ def parse_recipe(text):
         title = lines[0][2:].strip()
         lines = lines[1:]
 
-    # Split into (heading, body_lines) sections on '## ' headings; everything
-    # before the first one is the intro (byline, description, meta line).
     sections = []
     intro_lines = []
     current_heading = None
@@ -173,6 +176,26 @@ def parse_recipe(text):
     else:
         sections.append((current_heading, current_body))
 
+    return title, intro_lines, sections
+
+
+def is_step_section(heading, body):
+    """True for any section whose content becomes cooking-mode step cards
+    — a '## Step N: ...' heading, an '## Instructions'-ish heading, or a
+    section that's just mostly a numbered list even under some other name.
+    Shared by the parser and the edit form, so both agree on what counts
+    as a step (and therefore what gets excluded from the editable summary
+    text so editing doesn't duplicate or eat the Instructions section)."""
+    if STEP_HEADING_RE.match(heading):
+        return True
+    non_empty = [l for l in body if l.strip()]
+    numbered_ratio = (sum(1 for l in non_empty if NUMBERED_RE.match(l)) / len(non_empty)) if non_empty else 0
+    return bool(INSTRUCTION_WORD_RE.search(heading) or (numbered_ratio > 0.5 and not INGREDIENT_WORD_RE.search(heading)))
+
+
+def parse_recipe(text):
+    title, intro_lines, sections = split_sections(text)
+
     ingredient_groups = []  # [(group_label_or_None, [item, ...]), ...]
     steps = []              # [{"label": str_or_None, "html": str}, ...]
     notes_sections = []     # [(heading, html), ...]
@@ -181,7 +204,6 @@ def parse_recipe(text):
     for heading, body in sections:
         non_empty = [l for l in body if l.strip()]
         bullet_ratio = (sum(1 for l in non_empty if BULLET_RE.match(l)) / len(non_empty)) if non_empty else 0
-        numbered_ratio = (sum(1 for l in non_empty if NUMBERED_RE.match(l)) / len(non_empty)) if non_empty else 0
 
         if STEP_HEADING_RE.match(heading):
             label = STEP_HEADING_RE.sub("", heading).strip() or None
@@ -189,13 +211,15 @@ def parse_recipe(text):
             seen_steps_section = True
             continue
 
-        if INSTRUCTION_WORD_RE.search(heading) or (numbered_ratio > 0.5 and not INGREDIENT_WORD_RE.search(heading)):
+        if is_step_section(heading, body):
             for chunk in split_numbered_steps(body):
                 steps.append({"label": None, "html": render_block(chunk)})
             seen_steps_section = True
             continue
 
-        if INGREDIENT_WORD_RE.search(heading) or (bullet_ratio > 0.5 and not seen_steps_section):
+        if INGREDIENT_WORD_RE.search(heading) or (
+            bullet_ratio > 0.5 and not seen_steps_section and not NOTES_WORD_RE.search(heading)
+        ):
             if any("|" in l for l in non_empty):
                 items = [" ".join(c for c in row if c) for row in parse_md_table(body)]
                 items = [i for i in items if i]
@@ -217,39 +241,93 @@ def parse_recipe(text):
     }
 
 
+def extract_editable_summary(text):
+    """Everything from the file EXCEPT the title and the Instructions/Step
+    section(s), as raw markdown — this is what pre-fills the Edit form's
+    Summary box. Because it's the original text verbatim (not reconstructed
+    from the parsed/rendered form), a recipe's '## Ingredients' table or
+    '## Notes' section survives an edit unchanged as long as the Summary
+    text itself isn't touched, even though the Edit form never shows those
+    as separate fields."""
+    _title, intro_lines, sections = split_sections(text)
+    parts = []
+    intro = "\n".join(intro_lines).strip()
+    if intro:
+        parts.append(intro)
+    for heading, body in sections:
+        if is_step_section(heading, body):
+            continue
+        body_text = "\n".join(body).strip()
+        parts.append(f"## {heading}\n\n{body_text}" if body_text else f"## {heading}")
+    return "\n\n".join(parts)
+
+
+def extract_raw_steps(text):
+    """The recipe's steps as plain text lines, pre-rendering — one line per
+    step, matching the New/Edit form's 'one step per line' textarea
+    convention, so re-opening a recipe for editing shows its steps back the
+    same way they'd be typed in fresh."""
+    _title, _intro_lines, sections = split_sections(text)
+    lines = []
+    for heading, body in sections:
+        if not is_step_section(heading, body):
+            continue
+        if STEP_HEADING_RE.match(heading):
+            label = STEP_HEADING_RE.sub("", heading).strip()
+            body_text = " ".join(l.strip() for l in body if l.strip())
+            lines.append(f"{label}: {body_text}" if label else body_text)
+        else:
+            for chunk in split_numbered_steps(body):
+                lines.append(" ".join(l.strip() for l in chunk if l.strip()))
+    return lines
+
+
 def slugify(title):
     normalized = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^A-Za-z0-9]+", "_", normalized).strip("_")
     return slug or "recipe"
 
 
-def load_recipes():
-    """Every top-level .md file in RECIPES_DIR, parsed. Subfolders (e.g. an
-    "Original sources" archive) are skipped on purpose — only files directly
-    in Cooking/ are recipes."""
-    recipes = []
-    if not os.path.isdir(RECIPES_DIR):
-        return recipes
-    for name in sorted(os.listdir(RECIPES_DIR)):
+TRASH_DIR = os.path.join(RECIPES_DIR, ".trash")
+
+
+def _valid_slug(slug):
+    return bool(slug) and slug == os.path.basename(slug) and "/" not in slug and not slug.startswith(".")
+
+
+def _list_md_files(directory):
+    if not os.path.isdir(directory):
+        return []
+    names = []
+    for name in os.listdir(directory):
         if not name.lower().endswith(".md") or name.startswith("."):
             continue
+        if os.path.isfile(os.path.join(directory, name)):
+            names.append(name)
+    return names
+
+
+def load_recipes():
+    """Every top-level .md file in RECIPES_DIR, parsed and sorted by title.
+    Subfolders (an "Original sources" archive, or .trash — see below) are
+    skipped on purpose; only files directly in Cooking/ are live recipes."""
+    recipes = []
+    for name in _list_md_files(RECIPES_DIR):
         path = os.path.join(RECIPES_DIR, name)
-        if not os.path.isfile(path):
-            continue
-        slug = name[:-3]
         try:
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
         except OSError:
             continue
         parsed = parse_recipe(text)
-        parsed["slug"] = slug
+        parsed["slug"] = name[:-3]
         recipes.append(parsed)
+    recipes.sort(key=lambda r: r["title"].lower())
     return recipes
 
 
 def load_recipe(slug):
-    if not slug or slug != os.path.basename(slug) or "/" in slug or slug.startswith("."):
+    if not _valid_slug(slug):
         return None
     path = os.path.join(RECIPES_DIR, slug + ".md")
     if not os.path.isfile(path):
@@ -261,26 +339,166 @@ def load_recipe(slug):
     return parsed
 
 
+def load_recipe_raw(slug):
+    """Raw file text, for the Edit form (which needs the untouched markdown
+    to pre-fill Summary — see extract_editable_summary). Returns None if the
+    slug doesn't resolve to a real file in Cooking/."""
+    if not _valid_slug(slug):
+        return None
+    path = os.path.join(RECIPES_DIR, slug + ".md")
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _build_markdown(title, summary, steps):
+    parts = [f"# {title}\n"]
+    if summary.strip():
+        parts.append(f"\n{summary.strip()}\n")
+    step_lines = [l.strip() for l in steps.splitlines() if l.strip()]
+    if step_lines:
+        parts.append("\n## Instructions\n\n" + "\n".join(f"{i}. {l}" for i, l in enumerate(step_lines, 1)) + "\n")
+    return "".join(parts)
+
+
 def save_recipe(title, summary, steps):
+    """Creates a new recipe file, picking a free filename off the title."""
     slug = slugify(title)
     path = os.path.join(RECIPES_DIR, slug + ".md")
     suffix = 2
     while os.path.exists(path):
         path = os.path.join(RECIPES_DIR, f"{slug}_{suffix}.md")
         suffix += 1
-
-    parts = [f"# {title}\n"]
-    if summary.strip():
-        parts.append(f"\n{summary.strip()}\n")
-
-    step_lines = [l.strip() for l in steps.splitlines() if l.strip()]
-    if step_lines:
-        parts.append("\n## Instructions\n\n" + "\n".join(f"{i}. {l}" for i, l in enumerate(step_lines, 1)) + "\n")
-
     os.makedirs(RECIPES_DIR, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        f.write("".join(parts))
+        f.write(_build_markdown(title, summary, steps))
     return os.path.basename(path)[:-3]
+
+
+def update_recipe(slug, title, summary, steps):
+    """Overwrites an existing recipe in place — the filename/slug (and so
+    its URL) never changes on edit, even if the title does, so links and
+    bookmarks keep working."""
+    if not _valid_slug(slug):
+        return False
+    path = os.path.join(RECIPES_DIR, slug + ".md")
+    if not os.path.isfile(path):
+        return False
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_build_markdown(title, summary, steps))
+    return True
+
+
+# --- Trash: soft delete ------------------------------------------------------
+# There's no database row to flag deleted_at on, so "soft delete" here just
+# means moving the file into Cooking/.trash — load_recipes() already skips
+# anything not a direct child of Cooking/, so a trashed file simply stops
+# being a recipe until it's moved back.
+
+def _unique_path(directory, slug):
+    path = os.path.join(directory, slug + ".md")
+    suffix = 2
+    while os.path.exists(path):
+        path = os.path.join(directory, f"{slug}_{suffix}.md")
+        suffix += 1
+    return path
+
+
+def load_trash():
+    recipes = []
+    for name in _list_md_files(TRASH_DIR):
+        path = os.path.join(TRASH_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        parsed = parse_recipe(text)
+        parsed["slug"] = name[:-3]
+        recipes.append(parsed)
+    recipes.sort(key=lambda r: r["title"].lower())
+    return recipes
+
+
+def trash_recipe(slug):
+    if not _valid_slug(slug):
+        return False
+    src = os.path.join(RECIPES_DIR, slug + ".md")
+    if not os.path.isfile(src):
+        return False
+    os.makedirs(TRASH_DIR, exist_ok=True)
+    os.rename(src, _unique_path(TRASH_DIR, slug))
+    return True
+
+
+def restore_recipe(slug):
+    if not _valid_slug(slug):
+        return False
+    src = os.path.join(TRASH_DIR, slug + ".md")
+    if not os.path.isfile(src):
+        return False
+    os.rename(src, _unique_path(RECIPES_DIR, slug))
+    return True
+
+
+def delete_forever(slug):
+    if not _valid_slug(slug):
+        return False
+    path = os.path.join(TRASH_DIR, slug + ".md")
+    if not os.path.isfile(path):
+        return False
+    os.remove(path)
+    return True
+
+
+def empty_trash():
+    for name in _list_md_files(TRASH_DIR):
+        os.remove(os.path.join(TRASH_DIR, name))
+
+
+# --- "What can I make?" ingredient matching ---------------------------------
+# Deliberately simple word-overlap scoring, not real NLP: normalize both
+# sides to a bag of singular-ish lowercase words and call a recipe
+# ingredient line "have it" if any of its words appears in what you typed.
+# Good enough to rank "closest dish" and surface a rough percentage without
+# pulling in a matching library for a personal single-user tool.
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _word_variants(word):
+    variants = {word}
+    if word.endswith("es") and len(word) > 3:
+        variants.add(word[:-2])
+    if word.endswith("s") and len(word) > 2:
+        variants.add(word[:-1])
+    return variants
+
+
+def _tokenize(text):
+    words = set()
+    for w in _WORD_RE.findall(text.lower()):
+        words |= _word_variants(w)
+    return words
+
+
+def score_recipe(have_words, recipe):
+    """None if the recipe has no parsed ingredient list to match against;
+    otherwise a dict with a 0-100 percentage, and which ingredient lines
+    matched vs. are missing."""
+    all_items = [item for _, items in recipe["ingredient_groups"] for item in items]
+    if not all_items:
+        return None
+    matched, missing = [], []
+    for item in all_items:
+        (matched if _tokenize(item) & have_words else missing).append(item)
+    return {
+        "pct": round(len(matched) / len(all_items) * 100),
+        "matched": matched,
+        "missing": missing,
+        "total": len(all_items),
+    }
 
 
 # --- HTML shell --------------------------------------------------------------
@@ -288,65 +506,74 @@ def save_recipe(title, summary, steps):
 CSS = """
 :root {
   --bg: #000000;
-  --surface: #0D0D0F;
-  --surface-2: #17171A;
-  --border: #2B2B30;
-  --text: #ECECEF;
-  --text-dim: #8B8B93;
-  --accent: #F2994A;
-  --accent-hover: #FFAD66;
-  --chrome: #4C4C53;
+  --surface: #0A0A0A;
+  --surface-2: #141414;
+  --border: #262626;
+  --text: #ECECEC;
+  --text-dim: #96A0A0;
+  --accent: #2DD4BF;
+  --accent-2: #38BDF8;
+  --accent-soft: rgba(45, 212, 191, 0.12);
+  --mint: #2DD4BF;
+  --danger: #F0475B;
+  --chrome: #4A5555;
+  --gradient: linear-gradient(135deg, var(--accent), var(--accent-2));
 }
 * { box-sizing: border-box; }
 body {
   margin: 0; background: var(--bg); color: var(--text);
-  font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif;
-  font-size: 16px; line-height: 1.55;
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  font-size: 16px; line-height: 1.6;
+  background-image: radial-gradient(ellipse 900px 500px at 15% -10%, var(--accent-soft), transparent 60%);
+  background-repeat: no-repeat;
 }
-h1, h2, h3, .num {
-  font-family: 'Rajdhani', 'Barlow', sans-serif;
-  font-weight: 700;
-  letter-spacing: 0.01em;
+h1, h2, h3 {
+  font-family: 'Fraunces', Georgia, serif;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 a { color: var(--text); text-decoration: none; }
 .wrap { max-width: 880px; margin: 0 auto; padding: 0 1.25rem 4rem; }
 header.top {
   border-bottom: 1px solid var(--border);
-  padding: 1.5rem 0 1.1rem;
-  display: flex; align-items: baseline; justify-content: space-between; gap: 1rem;
+  padding: 1.75rem 0 1.25rem;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem;
 }
-header.top .brand { display: flex; align-items: center; gap: 0.6rem; }
-header.top .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
-header.top h1 { font-size: 1.5rem; margin: 0; text-transform: uppercase; }
+header.top .brand { display: flex; align-items: center; gap: 0.65rem; }
+header.top h1 { font-size: 1.6rem; margin: 0; }
 header.top a.back { font-size: 0.85rem; color: var(--text-dim); border-bottom: 1px dotted var(--chrome); }
 header.top a.back:hover { color: var(--text); }
 
 .recipe-card {
-  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-  padding: 1.3rem 1.4rem; margin: 1.1rem 0;
+  background: linear-gradient(160deg, var(--surface), var(--surface) 70%, var(--surface-2));
+  border: 1px solid var(--border); border-radius: 16px;
+  padding: 1.4rem 1.5rem; margin: 1.1rem 0;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.02) inset, 0 12px 28px -18px rgba(0,0,0,0.7);
 }
-.recipe-card h2 { margin: 0 0 0.4rem; font-size: 1.25rem; }
-.recipe-card .meta { color: var(--text-dim); font-size: 0.85rem; }
+.recipe-card h2 { margin: 0 0 0.45rem; font-size: 1.3rem; }
+.recipe-card .meta { color: var(--accent); opacity: 0.9; font-size: 0.82rem; font-weight: 600; letter-spacing: 0.02em; }
 .recipe-card .intro { color: var(--text-dim); font-size: 0.92rem; margin: 0.6rem 0 0; }
 .recipe-card .intro p { margin: 0; }
-.actions { margin-top: 1.1rem; display: flex; gap: 0.7rem; flex-wrap: wrap; }
+.actions { margin-top: 1.15rem; display: flex; gap: 0.7rem; flex-wrap: wrap; }
 .btn {
-  display: inline-block; padding: 0.55rem 1rem; border-radius: 6px;
+  display: inline-block; padding: 0.6rem 1.1rem; border-radius: 8px;
   font-weight: 600; font-size: 0.88rem; border: 1px solid var(--border);
-  background: var(--surface-2); color: var(--text);
+  background: var(--surface-2); color: var(--text); transition: border-color 0.15s, transform 0.15s;
 }
 .btn:hover { border-color: var(--chrome); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #1a0f04; }
-.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.primary { background: var(--gradient); border-color: transparent; color: #04211D; box-shadow: 0 6px 18px -8px var(--accent-2); }
+.btn.primary:hover { transform: translateY(-1px); box-shadow: 0 10px 22px -8px var(--accent-2); }
+.btn.danger { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); color: var(--danger); }
+.btn.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 
-.section-title { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin: 1.6rem 0 0.5rem; }
-.ing-group h3 { font-size: 1rem; color: var(--accent); margin: 1rem 0 0.4rem; }
+.section-title { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); margin: 1.7rem 0 0.6rem; }
+.ing-group h3 { font-size: 1.02rem; color: var(--accent); margin: 1rem 0 0.4rem; font-family: 'Fraunces', Georgia, serif; }
 .ing-group ul { margin: 0; padding-left: 1.3rem; }
-.ing-group li { margin: 0.25rem 0; }
-.notes-block h3 { font-size: 0.95rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin: 1.4rem 0 0.4rem; }
+.ing-group li { margin: 0.3rem 0; }
+.notes-block h3 { font-size: 0.95rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin: 1.4rem 0 0.4rem; font-family: 'Inter', sans-serif; font-weight: 700; }
 .notes-block ul, .notes-block ol { padding-left: 1.3rem; }
 .notes-block p { margin: 0.4rem 0; }
-.intro-block p { margin: 0.4rem 0 0; color: var(--text-dim); }
+.intro-block p { margin: 0.5rem 0 0; color: var(--text-dim); }
 .empty { color: var(--text-dim); padding: 1.5rem 0; }
 .pager { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 1.2rem 0; }
 .pager-status { color: var(--text-dim); font-size: 0.85rem; }
@@ -354,12 +581,39 @@ header.top a.back:hover { color: var(--text); }
 form.stack { display: flex; flex-direction: column; gap: 0.9rem; max-width: 560px; margin-top: 1.2rem; }
 form.stack label { font-size: 0.82rem; color: var(--text-dim); display: flex; flex-direction: column; gap: 0.35rem; }
 input, textarea {
-  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
-  color: var(--text); padding: 0.55rem 0.65rem; font-size: 0.95rem; font-family: inherit;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); padding: 0.6rem 0.7rem; font-size: 0.95rem; font-family: inherit;
 }
 input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
 textarea { resize: vertical; min-height: 6em; }
 .hint { color: var(--text-dim); font-size: 0.78rem; }
+
+/* --- Match cards ("What Can I Make?") ----------------------------------- */
+.match-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+  padding: 1.2rem 1.4rem; margin: 1rem 0; position: relative; overflow: hidden;
+}
+.match-card .match-bar { position: absolute; inset: 0 auto 0 0; width: var(--pct, 0%); background: var(--accent-soft); z-index: 0; }
+.match-card > * { position: relative; z-index: 1; }
+.match-card .row-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.match-card h2 { margin: 0; font-size: 1.2rem; }
+.match-pct { font-family: 'Fraunces', Georgia, serif; font-weight: 600; font-size: 1.4rem; color: var(--accent); white-space: nowrap; }
+.match-detail { color: var(--text-dim); font-size: 0.85rem; margin-top: 0.5rem; }
+.match-detail b { color: var(--mint); font-weight: 600; }
+
+/* --- Confirm modal (Android WebView never implements window.confirm()) - */
+.confirm-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75);
+  display: flex; align-items: center; justify-content: center;
+  padding: 1.5rem; z-index: 1000;
+}
+.confirm-overlay[hidden] { display: none; }
+.confirm-box {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  padding: 1.4rem 1.5rem; max-width: 360px; width: 100%;
+}
+.confirm-box p { margin: 0 0 1.2rem; font-size: 0.98rem; line-height: 1.5; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 0.6rem; }
 
 /* --- Step viewer: full-black flashcard deck, swipe/arrow between cards -- */
 .step-page {
@@ -371,9 +625,9 @@ textarea { resize: vertical; min-height: 6em; }
   padding: 1rem 1.25rem; gap: 1rem; flex: none;
 }
 .step-top a.back { color: var(--text-dim); font-size: 0.85rem; }
-.step-progress { padding: 0 1.25rem; color: var(--accent); font-family: 'Rajdhani', sans-serif; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.85rem; flex: none; }
+.step-progress { padding: 0 1.25rem; color: var(--accent); font-family: 'Inter', sans-serif; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.85rem; flex: none; }
 .step-bar { height: 3px; background: var(--surface-2); margin: 0.6rem 1.25rem 0; border-radius: 2px; overflow: hidden; flex: none; }
-.step-bar-fill { height: 100%; background: var(--accent); transition: width 0.28s ease; }
+.step-bar-fill { height: 100%; background: var(--gradient); transition: width 0.28s ease; }
 .deck-viewport { flex: 1; overflow: hidden; min-height: 0; }
 .deck-track { display: flex; height: 100%; will-change: transform; }
 .card {
@@ -381,32 +635,33 @@ textarea { resize: vertical; min-height: 6em; }
   display: flex; align-items: center; justify-content: center;
   padding: 1.5rem 1.5rem 2rem; text-align: center; overflow-y: auto;
 }
-.card-text { font-size: 1.5rem; line-height: 1.5; max-width: 640px; }
-.card-text .step-label { display: block; color: var(--accent); font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.6rem; font-family: 'Rajdhani', sans-serif; font-weight: 700; }
+.card-text { font-family: 'Fraunces', Georgia, serif; font-weight: 500; font-size: 1.55rem; line-height: 1.5; max-width: 640px; }
+.card-text .step-label { display: block; color: var(--accent); font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.6rem; font-family: 'Inter', sans-serif; font-weight: 700; }
 .step-nav { display: flex; gap: 0.8rem; padding: 0 1.25rem 1.5rem; flex: none; }
 .step-arrow {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  padding: 1.4rem; border-radius: 14px; border: 1px solid var(--border);
+  padding: 1.4rem; border-radius: 16px; border: 1px solid var(--border);
   background: var(--surface); color: var(--text); font-size: 2rem;
   -webkit-tap-highlight-color: transparent; user-select: none;
   -webkit-appearance: none; appearance: none; font-family: inherit; cursor: pointer; margin: 0;
 }
 .step-arrow.disabled { opacity: 0.3; pointer-events: none; }
-.step-arrow.primary { background: var(--accent); border-color: var(--accent); color: #1a0f04; }
-.step-arrow .lbl { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; margin-left: 0.5rem; font-family: 'Rajdhani', sans-serif; font-weight: 700; }
+.step-arrow.primary { background: var(--gradient); border-color: transparent; color: #04211D; box-shadow: 0 8px 22px -10px var(--accent-2); }
+.step-arrow .lbl { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; margin-left: 0.5rem; font-family: 'Inter', sans-serif; font-weight: 700; }
 
 @media (min-width: 820px) {
   body { font-size: 19px; }
   .wrap { max-width: 1000px; padding: 0 2rem 5rem; }
-  header.top { padding: 2.2rem 0 1.5rem; }
-  header.top h1 { font-size: 2rem; }
-  .recipe-card { padding: 1.7rem 1.9rem; }
-  .recipe-card h2 { font-size: 1.5rem; }
-  .btn { font-size: 1.02rem; padding: 0.7rem 1.3rem; border-radius: 8px; }
+  header.top { padding: 2.4rem 0 1.6rem; }
+  header.top h1 { font-size: 2.1rem; }
+  .recipe-card { padding: 1.8rem 2rem; }
+  .recipe-card h2 { font-size: 1.55rem; }
+  .btn { font-size: 1.02rem; padding: 0.7rem 1.3rem; border-radius: 9px; }
   form.stack { max-width: 620px; gap: 1.2rem; }
   input, textarea { font-size: 1.05rem; padding: 0.7rem 0.85rem; }
-  .card-text { font-size: 2rem; }
+  .card-text { font-size: 2.1rem; }
   .step-arrow { font-size: 2.6rem; padding: 2rem; }
+  .match-pct { font-size: 1.7rem; }
 }
 """
 
@@ -417,18 +672,47 @@ HEAD = (
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
     "<text y='.9em' font-size='90'>%F0%9F%8D%B3</text></svg>\">"
     "<link rel='preconnect' href='https://fonts.googleapis.com'>"
-    "<link href='https://fonts.googleapis.com/css2?family=Rajdhani:wght@600;700&family=Barlow:wght@400;500;600&display=swap' rel='stylesheet'>"
+    "<link href='https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap' rel='stylesheet'>"
     f"<style>{CSS}</style>"
+)
+
+# Android's WebView (the Cookbook app) never implements window.confirm() —
+# a tap on Delete/Empty Trash there would just silently no-op with no
+# dialog. This modal is plain HTML/CSS/JS with no dependency on that
+# browser API, so it behaves identically in the app and in a real browser.
+CONFIRM_MODAL = (
+    "<div class='confirm-overlay' id='confirmOverlay' hidden>"
+    "<div class='confirm-box'><p id='confirmMessage'></p>"
+    "<div class='confirm-actions'>"
+    "<button type='button' class='btn' id='confirmCancelBtn'>Cancel</button>"
+    "<button type='button' class='btn primary' id='confirmOkBtn'>Confirm</button>"
+    "</div></div></div>"
+    "<script>"
+    "(function(){"
+    "var pending=null;"
+    "var overlay=document.getElementById('confirmOverlay');"
+    "var msg=document.getElementById('confirmMessage');"
+    "window.confirmAction=function(form,message){"
+    "pending=form;msg.textContent=message;overlay.hidden=false;return false;"
+    "};"
+    "document.getElementById('confirmCancelBtn').addEventListener('click',function(){"
+    "pending=null;overlay.hidden=true;"
+    "});"
+    "document.getElementById('confirmOkBtn').addEventListener('click',function(){"
+    "overlay.hidden=true;if(pending){pending.submit();}"
+    "});"
+    "})();"
+    "</script>"
 )
 
 
 def page(title, body_html, back_href=None, back_label=None):
-    back = f"<a class='back' href='{back_href}'>&larr; {html.escape(back_label or 'Back')}</a>" if back_href else "<span></span>"
+    back = f"<a class='back' href='{back_href}'>&larr; {html.escape(back_label or 'Back')}</a>" if back_href else ""
     return (
         f"<!doctype html><html><head>{HEAD}</head><body><div class='wrap'>"
-        f"<header class='top'><div class='brand'><span class='dot'></span><h1>{html.escape(title)}</h1></div>{back}</header>"
+        f"<header class='top'>{back}<div class='brand'><h1>{html.escape(title)}</h1></div></header>"
         f"{body_html}"
-        f"</div></body></html>"
+        f"</div>{CONFIRM_MODAL}</body></html>"
     )
 
 
@@ -437,13 +721,21 @@ RECIPES_PER_PAGE = 10
 
 def render_home(page_num=1):
     recipes = load_recipes()
+    trash_count = len(load_trash())
+    top_actions = (
+        "<div class='actions'>"
+        "<a class='btn primary' href='/recipes/new'>+ New Recipe</a>"
+        "<a class='btn' href='/recommend'>What Can I Make?</a>"
+        + (f"<a class='btn' href='/trash'>Trash ({trash_count})</a>" if trash_count else "")
+        + "</div>"
+    )
     new_recipe_btn = "<div class='actions'><a class='btn primary' href='/recipes/new'>+ New Recipe</a></div>"
 
     if not recipes:
         body = (
             f"<p class='empty'>No recipes yet. Drop a .md file into "
             f"<code>{html.escape(RECIPES_DIR)}</code>, or type one in.</p>"
-            f"{new_recipe_btn}"
+            f"{top_actions}"
         )
         return page("Cookbook", body)
 
@@ -475,15 +767,15 @@ def render_home(page_num=1):
 
     pager = ""
     if total_pages > 1:
-        prev_link = f"<a class='btn' href='/?page={page_num - 1}'>&larr; Newer</a>" if page_num > 1 else "<span></span>"
-        next_link = f"<a class='btn' href='/?page={page_num + 1}'>Older &rarr;</a>" if page_num < total_pages else "<span></span>"
+        prev_link = f"<a class='btn' href='/?page={page_num - 1}'>&larr; Prev</a>" if page_num > 1 else "<span></span>"
+        next_link = f"<a class='btn' href='/?page={page_num + 1}'>Next &rarr;</a>" if page_num < total_pages else "<span></span>"
         pager = (
             f"<div class='pager'>{prev_link}"
             f"<span class='pager-status'>Page {page_num} of {total_pages}</span>"
             f"{next_link}</div>"
         )
 
-    body = new_recipe_btn + "".join(cards) + pager + new_recipe_btn
+    body = top_actions + "".join(cards) + pager + new_recipe_btn
     return page("Cookbook", body)
 
 
@@ -504,13 +796,23 @@ def render_recipe(slug):
         notes_html.append(f"<div class='notes-block'><h3>{html.escape(heading)}</h3>{body}</div>")
 
     cook_btn = (
-        f"<div class='actions'><a class='btn primary' href='/recipe/{slug_q}/step/1'>Start Cooking &rarr;</a></div>"
+        f"<a class='btn primary' href='/recipe/{slug_q}/step/1'>Start Cooking &rarr;</a>"
         if r["steps"] else ""
+    )
+
+    # Delete lives on the Edit screen, not here — the main recipe view is a
+    # read/cook surface, so it only offers Cook and Edit; a destructive
+    # action shouldn't sit one tap away from just viewing a recipe.
+    actions = (
+        f"<div class='actions'>"
+        f"{cook_btn}"
+        f"<a class='btn' href='/recipe/{slug_q}/edit'>Edit</a>"
+        f"</div>"
     )
 
     body = (
         f"<div class='intro-block'>{r['intro_html']}</div>"
-        f"{cook_btn}"
+        f"{actions}"
         f"{'<div class=\"section-title\">Ingredients</div>' + ''.join(groups_html) if groups_html else ''}"
         f"{''.join(notes_html)}"
     )
@@ -643,6 +945,126 @@ def render_new_recipe_form():
     return page("New Recipe", body, back_href="/", back_label="Cookbook")
 
 
+def render_edit_form(slug):
+    raw = load_recipe_raw(slug)
+    if raw is None:
+        return None
+    r = parse_recipe(raw)
+    title = html.escape(r["title"])
+    summary = html.escape(extract_editable_summary(raw))
+    steps = html.escape("\n".join(extract_raw_steps(raw)))
+    slug_q = quote(slug, safe="")
+
+    delete_msg = html.escape(f'Move "{r["title"]}" to trash? You can restore it later.')
+
+    body = (
+        f"<form class='stack' method='post' action='/recipe/{slug_q}/edit' "
+        f"onsubmit='return confirmAction(this, \"Save changes to this recipe?\")'>"
+        f"<label>Title<input name='title' value='{title}' required></label>"
+        f"<label>Steps<textarea name='steps' required>{steps}</textarea>"
+        f"<span class='hint'>One step per line — each line becomes its own card in the step-by-step / cooking view.</span></label>"
+        f"<label>Summary (optional)<textarea name='summary'>{summary}</textarea>"
+        f"<span class='hint'>Ingredients, timing, notes — whatever’s worth knowing before you start. Shown at the top of the recipe.</span></label>"
+        f"<div class='actions'>"
+        f"<button class='btn primary' type='submit'>Save changes</button>"
+        f"<a class='btn' href='/recipe/{slug_q}'>Cancel</a>"
+        f"</div>"
+        f"</form>"
+        f"<div class='actions'>"
+        f"<form method='post' action='/recipe/{slug_q}/delete'>"
+        f"<button type='submit' class='btn danger' data-confirm='{delete_msg}' "
+        f"onclick='return confirmAction(this.form, this.dataset.confirm)'>Delete</button>"
+        f"</form>"
+        f"</div>"
+    )
+    return page(f"Edit — {r['title']}", body, back_href=f"/recipe/{slug_q}", back_label=r["title"])
+
+
+def render_trash():
+    trashed = load_trash()
+    if not trashed:
+        body = "<p class='empty'>Trash is empty.</p>"
+        return page("Trash", body, back_href="/", back_label="Cookbook")
+
+    cards = []
+    for r in trashed:
+        slug_q = quote(r["slug"], safe="")
+        restore_msg = html.escape(f'Restore "{r["title"]}"?')
+        delete_msg = html.escape(f'Permanently delete "{r["title"]}"? This cannot be undone.')
+        cards.append(
+            f"<div class='recipe-card'>"
+            f"<h2>{html.escape(r['title'])}</h2>"
+            f"<div class='actions'>"
+            f"<form method='post' action='/recipe/{slug_q}/restore'>"
+            f"<button type='submit' class='btn primary' data-confirm='{restore_msg}' "
+            f"onclick='return confirmAction(this.form, this.dataset.confirm)'>Restore</button>"
+            f"</form>"
+            f"<form method='post' action='/recipe/{slug_q}/delete-forever'>"
+            f"<button type='submit' class='btn danger' data-confirm='{delete_msg}' "
+            f"onclick='return confirmAction(this.form, this.dataset.confirm)'>Delete forever</button>"
+            f"</form>"
+            f"</div></div>"
+        )
+
+    empty_msg = html.escape(f"Permanently delete all {len(trashed)} item(s) in trash? This cannot be undone.")
+    empty_btn = (
+        f"<div class='actions'><form method='post' action='/trash/empty'>"
+        f"<button type='submit' class='btn danger' data-confirm='{empty_msg}' "
+        f"onclick='return confirmAction(this.form, this.dataset.confirm)'>Empty Trash</button>"
+        f"</form></div>"
+    )
+
+    body = (
+        "<p class='hint'>Deleted recipes land here first. Restore to bring one "
+        "back, or delete forever to remove it for good.</p>"
+        f"{empty_btn}{''.join(cards)}"
+    )
+    return page("Trash", body, back_href="/", back_label="Cookbook")
+
+
+def render_recommend(have_text=""):
+    body = (
+        "<form class='stack' method='post' action='/recommend'>"
+        f"<label>What ingredients do you have?<textarea name='have' placeholder='eggs&#10;garlic&#10;soy sauce&#10;green onion' required>{html.escape(have_text)}</textarea>"
+        "<span class='hint'>One per line. Matching is approximate — based on shared words with each recipe's ingredient list.</span></label>"
+        "<div class='actions'><button class='btn primary' type='submit'>Find Recipes</button></div>"
+        "</form>"
+    )
+
+    if have_text.strip():
+        have_words = _tokenize(have_text)
+        scored = []
+        for r in load_recipes():
+            s = score_recipe(have_words, r)
+            if s is not None:
+                scored.append((r, s))
+        scored.sort(key=lambda pair: (-pair[1]["pct"], -len(pair[1]["matched"])))
+        top = [pair for pair in scored if pair[1]["pct"] > 0][:5]
+
+        if not scored:
+            body += "<p class='empty'>None of your recipes have a parsed ingredient list to match against yet.</p>"
+        elif not top:
+            body += "<p class='empty'>No close matches — none of your recipes share an ingredient with that list.</p>"
+        else:
+            result_cards = []
+            for r, s in top:
+                slug_q = quote(r["slug"], safe="")
+                missing = ", ".join(s["missing"][:6]) + ("…" if len(s["missing"]) > 6 else "") if s["missing"] else ""
+                missing_html = f"<div class='match-detail'>Missing: {html.escape(missing)}</div>" if missing else "<div class='match-detail'><b>You have everything.</b></div>"
+                result_cards.append(
+                    f"<div class='match-card' style='--pct:{s['pct']}%'>"
+                    f"<div class='match-bar'></div>"
+                    f"<div class='row-head'><h2><a href='/recipe/{slug_q}'>{html.escape(r['title'])}</a></h2>"
+                    f"<span class='match-pct'>{s['pct']}%</span></div>"
+                    f"<div class='match-detail'>{len(s['matched'])} of {s['total']} ingredients you have</div>"
+                    f"{missing_html}"
+                    f"</div>"
+                )
+            body += f"<div class='section-title'>Closest matches</div>{''.join(result_cards)}"
+
+    return page("What Can I Make?", body, back_href="/", back_label="Cookbook")
+
+
 # --- HTTP handler ------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
@@ -702,6 +1124,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_html(render_home(page_num))
         if parts == ["recipes", "new"]:
             return self._send_html(render_new_recipe_form())
+        if parts == ["recommend"]:
+            return self._send_html(render_recommend())
+        if parts == ["trash"]:
+            return self._send_html(render_trash())
+        if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "edit":
+            out = render_edit_form(parts[1])
+            return self._send_html(out) if out else self._not_found()
         if len(parts) == 2 and parts[0] == "recipe":
             out = render_recipe(parts[1])
             return self._send_html(out) if out else self._not_found()
@@ -730,6 +1159,33 @@ class Handler(BaseHTTPRequestHandler):
                 steps=form.get("steps", ""),
             )
             return self._redirect(f"/recipe/{quote(slug, safe='')}")
+
+        if parts == ["recommend"]:
+            return self._send_html(render_recommend(form.get("have", "")))
+
+        if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "edit":
+            slug = parts[1]
+            title = form.get("title", "").strip()
+            if not title:
+                return self._redirect(f"/recipe/{quote(slug, safe='')}/edit")
+            ok = update_recipe(slug, title=title, summary=form.get("summary", ""), steps=form.get("steps", ""))
+            return self._redirect(f"/recipe/{quote(slug, safe='')}") if ok else self._not_found()
+
+        if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "delete":
+            trash_recipe(parts[1])
+            return self._redirect("/")
+
+        if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "restore":
+            restore_recipe(parts[1])
+            return self._redirect("/trash")
+
+        if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "delete-forever":
+            delete_forever(parts[1])
+            return self._redirect("/trash")
+
+        if parts == ["trash", "empty"]:
+            empty_trash()
+            return self._redirect("/trash")
 
         self._not_found()
 

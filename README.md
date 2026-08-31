@@ -36,8 +36,25 @@ update.
   `## Preparation Instructions` heading, ingredients as a bullet list *or*
   a table, and ingredients split across a few headed groups (`Sauce`,
   `Beef`, `Noodles`, …) as long as they come before the instructions.
-- A subfolder like `Original sources/` is ignored — only files directly in
-  the Cooking folder are treated as recipes.
+- **Edit, with a confirm step** — every recipe has an Edit button; saving
+  asks you to confirm first. Editing never renames the file, so links and
+  bookmarks keep working even if you change the title. A scraped recipe's
+  `## Ingredients`/`## Notes`/etc. survive an edit untouched — the Summary
+  box is pre-filled with that raw markdown, not a reconstruction of it.
+- **Delete → Trash, not gone** — Delete moves a recipe into a `.trash`
+  subfolder (confirmed first) instead of removing the file. The Trash page
+  lists what's there with **Restore** or **Delete forever**, plus an
+  **Empty Trash** for clearing it all out — all destructive actions confirm
+  first, since Android's WebView never implements the browser's native
+  confirm() dialog.
+- **Sorted by name** — the recipe list is always alphabetical by title, no
+  "newest first" ordering to think about.
+- **"What Can I Make?"** — type the ingredients you have (one per line) and
+  it ranks every recipe by percentage overlap with its ingredient list,
+  showing what's missing for the closest matches. Word-overlap matching,
+  not real NLP — good enough to point at the closest dish, not exact.
+- A subfolder like `Original sources/` (or `.trash`) is ignored — only
+  files directly in the Cooking folder are treated as live recipes.
 
 ## Running it
 
@@ -110,14 +127,27 @@ at the server, same idea as
 Android client. It has no data or logic of its own; every screen is just
 this same server rendering a page.
 
+The server address and Basic Auth login aren't baked into the APK — the
+app asks for them itself on first launch (server address, username,
+password), and keeps them in on-device storage. That means installing on
+a new/wiped phone, or after losing the machine that built an old APK,
+never requires a rebuild from source — just reinstall and type the server
+address and login back in. **Server Settings** in the toolbar's overflow
+menu reopens that same screen later, pre-filled with whatever's currently
+saved, to fix a typo or point at a different server.
+
 1. Open the `android/` folder in Android Studio (or build from the
    command line with the Gradle install at
    `~/android-toolchain/gradle-8.7`).
-2. Copy `android/secrets.properties.example` to
-   `android/secrets.properties` and fill in your server's address and
-   Basic Auth credentials. Gitignored — never committed.
-3. Build & install the debug APK:
+2. Build & install the debug APK:
    ```sh
    cd android && gradle assembleDebug
    # APK lands at android/app/build/outputs/apk/debug/app-debug.apk
    ```
+3. On first launch, enter the server's address (e.g. `192.168.1.5:8092`)
+   and the username/password from that server's `local_secrets.py`.
+
+`android/secrets.properties.example` still exists as an optional
+convenience: a `secrets.properties` copy (gitignored) pre-fills the setup
+screen for whoever builds from that machine, but isn't required — a fresh
+checkout with none of that still builds and just asks on first run.
