@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
 Cookbook — a small, dependency-free (stdlib only) HTTP server for browsing
-and cooking from recipes stored as plain Markdown files in
-~/Nextcloud/Documents/Cooking. Same philosophy as Vehicle Maintenance
-Record: one file, plain Python, nothing to pip install, nothing to break
-on an update.
+and cooking from recipes stored as plain Markdown files in a folder on
+disk. Same philosophy as Vehicle Maintenance Record: one file, plain
+Python, nothing to pip install, nothing to break on an update.
 
 Recipes are read straight off disk on every request — there's no database
 and no build step, so a file dropped into the Cooking folder from any
-device (upload, Nextcloud sync, scp, whatever) just shows up the next time
+device (upload, a sync client, scp, whatever) just shows up the next time
 the page loads.
+
+The folder defaults to ~/Documents/Cooking; override it with the
+COOKBOOK_RECIPES_DIR environment variable (set in the systemd unit, not
+committed here) if your actual data lives somewhere else.
 
 Run:  python3 server.py
 Serves on 0.0.0.0:8092, protected by HTTP Basic Auth.
 """
 import base64
+import email
 import html
 import json
 import os
@@ -24,7 +28,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse, quote, unquote
 
 PORT = 8092
-RECIPES_DIR = os.path.join(os.path.expanduser("~"), "Nextcloud", "Documents", "Cooking")
+RECIPES_DIR = os.environ.get(
+    "COOKBOOK_RECIPES_DIR",
+    os.path.join(os.path.expanduser("~"), "Documents", "Cooking"),
+)
 
 # Real credentials live in local_secrets.py, gitignored — see
 # local_secrets.py.example. Falls back to an obviously-placeholder password
@@ -592,12 +599,89 @@ def delete_forever(slug):
     if not os.path.isfile(path):
         return False
     os.remove(path)
+    delete_recipe_photo(slug)
     return True
 
 
 def empty_trash():
     for name in _list_md_files(TRASH_DIR):
         os.remove(os.path.join(TRASH_DIR, name))
+
+
+# --- Recipe photo -------------------------------------------------------
+# One optional photo per recipe, stored as <slug>.<ext> right next to
+# <slug>.md in RECIPES_DIR — load_recipes()/_list_md_files() only ever look
+# at .md files, so these sit there invisibly as far as recipe listing goes.
+# No separate metadata needed: the slug is the join key.
+
+PHOTO_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "gif")
+PHOTO_CONTENT_TYPES = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+    "webp": "image/webp", "gif": "image/gif",
+}
+
+
+def find_recipe_photo(slug):
+    if not _valid_slug(slug):
+        return None
+    for ext in PHOTO_EXTENSIONS:
+        if os.path.isfile(os.path.join(RECIPES_DIR, f"{slug}.{ext}")):
+            return f"{slug}.{ext}"
+    return None
+
+
+def save_recipe_photo(slug, filename, data):
+    if not data or not _valid_slug(slug):
+        return
+    ext = os.path.splitext(filename)[1].lstrip(".").lower()
+    if ext == "jpeg":
+        ext = "jpg"
+    if ext not in PHOTO_EXTENSIONS:
+        return
+    delete_recipe_photo(slug)  # drop any old photo under a different extension
+    with open(os.path.join(RECIPES_DIR, f"{slug}.{ext}"), "wb") as f:
+        f.write(data)
+
+
+def delete_recipe_photo(slug):
+    if not _valid_slug(slug):
+        return
+    for ext in PHOTO_EXTENSIONS:
+        path = os.path.join(RECIPES_DIR, f"{slug}.{ext}")
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+def _parse_multipart(body, content_type_header):
+    """Text fields and uploaded files out of a multipart/form-data POST
+    body. Built on the stdlib email package rather than a hand-rolled
+    boundary splitter — multipart/form-data is structurally the same as a
+    MIME multipart message, so prepending a Content-Type header and handing
+    the whole thing to email.message_from_bytes lets a well-tested stdlib
+    parser handle the fiddly part (boundary matching, binary payloads)
+    instead of a bespoke one.
+    """
+    header = f"Content-Type: {content_type_header}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii", "ignore")
+    msg = email.message_from_bytes(header + body)
+    fields, files = {}, {}
+    if not msg.is_multipart():
+        return fields, files
+    for part in msg.get_payload():
+        name = filename = None
+        for piece in part.get("Content-Disposition", "").split(";"):
+            piece = piece.strip()
+            if piece.startswith("name="):
+                name = piece[len("name="):].strip('"')
+            elif piece.startswith("filename="):
+                filename = piece[len("filename="):].strip('"')
+        if name is None:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        if filename:
+            files[name] = (filename, payload)
+        else:
+            fields[name] = payload.decode("utf-8", errors="replace")
+    return fields, files
 
 
 # --- "What can I make?" ingredient matching ---------------------------------
@@ -744,6 +828,8 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 textarea { resize: vertical; min-height: 6em; }
 .meta-fields { display: flex; gap: 0.7rem; flex-wrap: wrap; }
 .meta-fields label { flex: 1; min-width: 120px; }
+.checkbox-label { flex-direction: row !important; align-items: center; gap: 0.5rem !important; }
+.checkbox-label input { width: auto; }
 .hint { color: var(--text-dim); font-size: 0.78rem; }
 
 .list-adder { display: flex; gap: 0.6rem; }
@@ -791,6 +877,29 @@ textarea { resize: vertical; min-height: 6em; }
 }
 .confirm-box p { margin: 0 0 1.2rem; font-size: 0.98rem; line-height: 1.5; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 0.6rem; }
+
+/* --- Recipe photo + lightbox -------------------------------------------- */
+.recipe-photo {
+  display: block; width: 100%; max-height: 260px; object-fit: cover;
+  border-radius: 16px; margin: 0 0 1rem; cursor: zoom-in; border: 1px solid var(--border);
+}
+.photo-lightbox {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.9); z-index: 1100;
+  display: flex; align-items: center; justify-content: center; padding: 1.5rem;
+  overflow: auto;
+}
+.photo-lightbox[hidden] { display: none; }
+.photo-lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }
+.photo-lightbox-close {
+  position: fixed; top: 1rem; right: 1rem; z-index: 1101;
+  width: 42px; height: 42px; border-radius: 50%; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 1.2rem;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.photo-field-preview {
+  display: block; max-width: 100%; max-height: 200px; border-radius: 10px;
+  margin-top: 0.6rem; border: 1px solid var(--border);
+}
 
 /* --- Step viewer: full-black flashcard deck, swipe/arrow between cards -- */
 .step-page {
@@ -921,6 +1030,34 @@ CONFIRM_MODAL = (
 )
 
 
+# Tapping a recipe photo opens it full-size in this overlay — closes either
+# on the explicit X button or a tap anywhere outside the image itself
+# (clicking the image resizes/pans via native pinch-zoom instead of
+# closing). Shared by every recipe page the same way CONFIRM_MODAL is.
+PHOTO_LIGHTBOX = (
+    "<div class='photo-lightbox' id='photoLightbox' hidden>"
+    "<button type='button' class='photo-lightbox-close' id='photoLightboxClose' aria-label='Close'>&times;</button>"
+    "<img id='photoLightboxImg' src='' alt=''>"
+    "</div>"
+    "<script>"
+    "(function(){"
+    "var overlay=document.getElementById('photoLightbox');"
+    "var img=document.getElementById('photoLightboxImg');"
+    "var closeBtn=document.getElementById('photoLightboxClose');"
+    "document.querySelectorAll('.recipe-photo').forEach(function(thumb){"
+    "thumb.addEventListener('click',function(){"
+    "img.src=thumb.src; overlay.hidden=false;"
+    "});"
+    "});"
+    "overlay.addEventListener('click',function(e){"
+    "if(e.target===overlay){ overlay.hidden=true; }"
+    "});"
+    "closeBtn.addEventListener('click',function(){ overlay.hidden=true; });"
+    "})();"
+    "</script>"
+)
+
+
 # Ingredients and Steps on the New/Edit forms are both "type one, click Add,
 # repeat" list builders rather than a single multi-line textarea — the
 # visible <ul> is pure JS state; a hidden textarea (still a real form field)
@@ -1002,6 +1139,46 @@ def _meta_fields_html(prep_time="", cook_time="", difficulty=""):
     )
 
 
+def _photo_field_html(existing_photo_url=None):
+    preview_hidden = "" if existing_photo_url else " hidden"
+    remove_checkbox = (
+        "<label class='checkbox-label'>"
+        "<input type='checkbox' name='remove_photo' value='1'> Remove current photo"
+        "</label>"
+        if existing_photo_url else ""
+    )
+    return (
+        "<label>Photo (optional)"
+        "<input type='file' name='photo' id='photoInput' accept='image/*'>"
+        f"<img id='photoFieldPreview' class='photo-field-preview'{preview_hidden} "
+        f"src='{html.escape(existing_photo_url or '')}' alt=''>"
+        "</label>"
+        f"{remove_checkbox}"
+    )
+
+
+# Live preview as soon as a file's picked, before the form is even submitted
+# — works identically whether that file came from a phone's camera/gallery
+# or a desktop file browser, since <input type=file accept=image/*> already
+# offers the right picker for whichever device opens the page.
+PHOTO_FIELD_SCRIPT = (
+    "<script>"
+    "(function(){"
+    "var input=document.getElementById('photoInput');"
+    "var preview=document.getElementById('photoFieldPreview');"
+    "if(!input) return;"
+    "input.addEventListener('change',function(){"
+    "var file=input.files && input.files[0];"
+    "if(!file) return;"
+    "var reader=new FileReader();"
+    "reader.onload=function(e){ preview.src=e.target.result; preview.hidden=false; };"
+    "reader.readAsDataURL(file);"
+    "});"
+    "})();"
+    "</script>"
+)
+
+
 def page(title, body_html, back_href=None, back_label=None):
     # title=None skips the header entirely — used on the home page, where
     # the Android app's own native toolbar already shows "My Kitchen / by
@@ -1017,7 +1194,7 @@ def page(title, body_html, back_href=None, back_label=None):
         f"<!doctype html><html><head>{HEAD}</head><body><div class='wrap'>"
         f"{header}"
         f"{body_html}"
-        f"</div>{CONFIRM_MODAL}</body></html>"
+        f"</div>{CONFIRM_MODAL}{PHOTO_LIGHTBOX}</body></html>"
     )
 
 
@@ -1222,7 +1399,13 @@ def render_recipe(slug):
         f"</div>"
     )
 
+    photo_html = (
+        f"<img class='recipe-photo' src='/recipe/{slug_q}/photo' alt=''>"
+        if find_recipe_photo(r["slug"]) else ""
+    )
+
     body = (
+        f"{photo_html}"
         f"<div class='intro-block'>{r['intro_html']}</div>"
         f"{actions}"
         f"{'<div class=\"section-title\">Ingredients</div>' + ''.join(groups_html) if groups_html else ''}"
@@ -1460,8 +1643,9 @@ def render_step(slug, n):
 
 def render_new_recipe_form():
     body = (
-        "<form class='stack' method='post' action='/recipes/new'>"
+        "<form class='stack' method='post' action='/recipes/new' enctype='multipart/form-data'>"
         "<label>Title<input name='title' placeholder='Grandma’s Fried Rice' required></label>"
+        + _photo_field_html()
         + _meta_fields_html()
         + _list_builder_field(
             "ingredients", "Ingredients", "e.g. 2 cups jasmine rice", "Add",
@@ -1476,6 +1660,7 @@ def render_new_recipe_form():
         "<div class='actions'><button class='btn primary' type='submit'>Save recipe</button></div>"
         "</form>"
         + LIST_BUILDER_SCRIPT
+        + PHOTO_FIELD_SCRIPT
     )
     return page("New Recipe", body, back_href="/", back_label="My Kitchen")
 
@@ -1505,10 +1690,14 @@ def render_edit_form(slug):
 
     delete_msg = html.escape(f'Move "{r["title"]}" to trash? You can restore it later.')
 
+    existing_photo_url = f"/recipe/{slug_q}/photo" if find_recipe_photo(slug) else None
+
     body = (
         f"<form class='stack' method='post' action='/recipe/{slug_q}/edit' "
+        f"enctype='multipart/form-data' "
         f"onsubmit='return confirmAction(this, \"Save changes to this recipe?\")'>"
         f"<label>Title<input name='title' value='{title}' required></label>"
+        + _photo_field_html(existing_photo_url)
         + _meta_fields_html(
             prep_time=r["meta"]["prep_time"] or "",
             cook_time=r["meta"]["cook_time"] or "",
@@ -1531,6 +1720,7 @@ def render_edit_form(slug):
         f"</div>"
         f"</form>"
         f"{LIST_BUILDER_SCRIPT}"
+        f"{PHOTO_FIELD_SCRIPT}"
         f"<div class='actions'>"
         f"<form method='post' action='/recipe/{slug_q}/delete'>"
         f"<button type='submit' class='btn danger' data-confirm='{delete_msg}' "
@@ -1665,8 +1855,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_form(self):
         length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length).decode("utf-8") if length else ""
-        parsed = parse_qs(raw)
+        body = self.rfile.read(length) if length else b""
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.startswith("multipart/form-data"):
+            fields, self.uploaded_files = _parse_multipart(body, content_type)
+            return fields
+        self.uploaded_files = {}
+        parsed = parse_qs(body.decode("utf-8"))
         return {k: v[0] for k, v in parsed.items()}
 
     def do_GET(self):
@@ -1695,6 +1890,21 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "edit":
             out = render_edit_form(parts[1])
             return self._send_html(out) if out else self._not_found()
+        if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "photo":
+            filename = find_recipe_photo(parts[1])
+            if filename is None:
+                return self._not_found()
+            path = os.path.join(RECIPES_DIR, filename)
+            ext = os.path.splitext(filename)[1].lstrip(".").lower()
+            with open(path, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", PHOTO_CONTENT_TYPES.get(ext, "application/octet-stream"))
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if len(parts) == 2 and parts[0] == "recipe":
             out = render_recipe(parts[1])
             return self._send_html(out) if out else self._not_found()
@@ -1726,6 +1936,9 @@ class Handler(BaseHTTPRequestHandler):
                 cook_time=form.get("cook_time", ""),
                 difficulty=form.get("difficulty", ""),
             )
+            photo = self.uploaded_files.get("photo")
+            if photo and photo[0]:
+                save_recipe_photo(slug, photo[0], photo[1])
             return self._redirect(f"/recipe/{quote(slug, safe='')}")
 
         if parts == ["recommend"]:
@@ -1743,6 +1956,11 @@ class Handler(BaseHTTPRequestHandler):
                 cook_time=form.get("cook_time", ""),
                 difficulty=form.get("difficulty", ""),
             )
+            photo = self.uploaded_files.get("photo")
+            if photo and photo[0]:
+                save_recipe_photo(slug, photo[0], photo[1])
+            elif form.get("remove_photo"):
+                delete_recipe_photo(slug)
             return self._redirect(f"/recipe/{quote(slug, safe='')}") if ok else self._not_found()
 
         if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "delete":

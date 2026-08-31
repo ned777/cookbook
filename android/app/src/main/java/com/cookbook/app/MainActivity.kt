@@ -1,15 +1,19 @@
 package com.cookbook.app
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import android.view.WindowManager
 import android.webkit.HttpAuthHandler
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.cookbook.app.databinding.ActivityMainBinding
 
@@ -29,6 +33,18 @@ class MainActivity : AppCompatActivity() {
     // return from the Settings screen actually changed something (vs. just
     // switching apps and back) before reloading the WebView from scratch.
     private var loadedBaseUrl: String? = null
+
+    // The New/Edit recipe forms' <input type=file accept=image/*> otherwise
+    // does nothing in a WebView — Chrome and every other real browser have
+    // a built-in file picker, but WebView only gets one if the app supplies
+    // it here. GetContent() covers both "choose from gallery" and, on
+    // phones that route it there, "take a photo" — whichever the system
+    // picker itself offers for an image MIME type.
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        filePathCallback?.onReceiveValue(uri?.let { arrayOf(it) })
+        filePathCallback = null
+    }
 
     // The cooking-mode deck (any /step/ URL) is meant to sit propped up on a
     // counter while your hands are busy — the screen timing out mid-recipe
@@ -64,6 +80,24 @@ class MainActivity : AppCompatActivity() {
         binding.webView.settings.javaScriptEnabled = true
         binding.webView.settings.domStorageEnabled = true
         binding.webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
+        // Pinch-to-zoom, no on-screen +/- controls — mainly for the recipe
+        // photo lightbox, where native zoom is how you actually see detail.
+        binding.webView.settings.setSupportZoom(true)
+        binding.webView.settings.builtInZoomControls = true
+        binding.webView.settings.displayZoomControls = false
+
+        binding.webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                webView: WebView?,
+                callback: ValueCallback<Array<Uri>>,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                filePathCallback?.onReceiveValue(null)
+                filePathCallback = callback
+                pickImageLauncher.launch("image/*")
+                return true
+            }
+        }
 
         binding.webView.webViewClient = object : WebViewClient() {
             // The server basic-auth-protects every request. Auto-answering

@@ -4,13 +4,14 @@ Self-hosted recipe box: browse recipes, then cook through them one step
 at a time — a big **Next** arrow, a big **Previous** arrow, or just swipe
 on a phone.
 
-Recipes are plain Markdown files sitting in a folder
-(`~/Nextcloud/Documents/Cooking`). There's no database and no build step —
-the page is rendered from whatever's in that folder on every request, so a
-new `.md` file dropped in from any device (Nextcloud sync, upload, `scp`,
-whatever) shows up the next time the page loads. New recipes can also be
-typed straight into the app, which writes the same kind of Markdown file
-back into that folder.
+Recipes are plain Markdown files sitting in a folder (`~/Documents/Cooking`
+by default — override with the `COOKBOOK_RECIPES_DIR` environment
+variable). There's no database and no build step — the page is rendered
+from whatever's in that folder on every request, so a new `.md` file
+dropped in from any device (a sync client, upload, `scp`, whatever) shows
+up the next time the page loads. New recipes can also be typed straight
+into the app, which writes the same kind of Markdown file back into that
+folder.
 
 A single Python file using only
 `http.server`, nothing to `pip install`, nothing to break on a Python
@@ -78,6 +79,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/path/to/this/repo
+Environment=COOKBOOK_RECIPES_DIR=/path/to/your/recipes/folder
 ExecStart=/usr/bin/python3 /path/to/this/repo/server.py
 Restart=always
 RestartSec=5
@@ -114,8 +116,9 @@ asking for one separately.
 
 ## Data
 
-Recipes live in `~/Nextcloud/Documents/Cooking`, not in this repo —
-they're your data, already synced by Nextcloud, not part of the app.
+Recipes live in `~/Documents/Cooking` (or wherever `COOKBOOK_RECIPES_DIR`
+points), not in this repo — they're your data, kept in sync however you
+like, not part of the app.
 
 ## Android app
 
