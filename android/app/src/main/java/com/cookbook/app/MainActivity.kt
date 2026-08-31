@@ -37,12 +37,14 @@ class MainActivity : AppCompatActivity() {
     // The New/Edit recipe forms' <input type=file accept=image/*> otherwise
     // does nothing in a WebView — Chrome and every other real browser have
     // a built-in file picker, but WebView only gets one if the app supplies
-    // it here. GetContent() covers both "choose from gallery" and, on
-    // phones that route it there, "take a photo" — whichever the system
-    // picker itself offers for an image MIME type.
+    // it here. GetMultipleContents() covers both "choose from gallery" (one
+    // or several at once, since the photo uploader's <input> has the
+    // `multiple` attribute) and, on phones that route it there, "take a
+    // photo" — whichever the system picker itself offers for an image MIME
+    // type.
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
-    private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        filePathCallback?.onReceiveValue(uri?.let { arrayOf(it) })
+    private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris: List<Uri> ->
+        filePathCallback?.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray())
         filePathCallback = null
     }
 
