@@ -999,7 +999,6 @@ def _meta_fields_html(prep_time="", cook_time="", difficulty=""):
         f"<label>Cook Time<input name='cook_time' value='{html.escape(cook_time)}' placeholder='e.g. 20 min'></label>"
         f"<label>Difficulty<select name='difficulty'>{options}</select></label>"
         "</div>"
-        "<span class='hint'>Total Time is added up from Prep + Cook automatically.</span>"
     )
 
 
