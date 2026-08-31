@@ -249,10 +249,60 @@ def extract_recipe_meta(intro_text):
     total_time = found.get("total_time")
     return {
         "servings": found.get("servings"),
+        "prep_time": found.get("prep_time"),
+        "cook_time": found.get("cook_time"),
         "total_time": total_time,
         "total_time_minutes": _parse_minutes(total_time),
         "difficulty": found.get("difficulty"),
     }
+
+
+# Prep/Cook/Total Time and Difficulty get their own Edit-form fields, so a
+# saved recipe's inline "**Prep Time:** ..." fragments need to disappear
+# from the Summary text on edit (else they'd show up twice — once in the
+# dedicated fields, once still sitting in the free-text Summary below).
+# Servings isn't included: there's no dedicated field for it, so it's left
+# alone wherever it appears in the free text.
+_EDITABLE_META_LABELS = ["Prep(?:\\s*Time)?", "Cook(?:\\s*Time)?", "Total(?:\\s*Time)?", "Difficulty"]
+_STRIP_META_RE = re.compile(
+    r"\*\*(?:" + "|".join(_EDITABLE_META_LABELS) + r"):?\*\*\s*[^\n*|]+",
+    re.IGNORECASE,
+)
+
+
+def _strip_meta_fields(text):
+    text = _STRIP_META_RE.sub("", text)
+    cleaned_lines = []
+    for line in text.split("\n"):
+        parts = [p.strip() for p in line.split("|")]
+        parts = [p for p in parts if p]
+        cleaned_lines.append(" | ".join(parts))
+    result = "\n".join(cleaned_lines)
+    return re.sub(r"\n{3,}", "\n\n", result).strip()
+
+
+def _format_minutes(total_minutes):
+    if total_minutes < 60:
+        return f"{total_minutes} min"
+    hours, mins = divmod(total_minutes, 60)
+    return f"{hours} hr {mins} min" if mins else f"{hours} hr"
+
+
+def _build_meta_line(prep_time, cook_time, difficulty):
+    # No Total Time input — it's always derived from Prep + Cook, never
+    # typed separately, so the two numbers can't drift out of sync.
+    bits = []
+    if prep_time.strip():
+        bits.append(f"**Prep Time:** {prep_time.strip()}")
+    if cook_time.strip():
+        bits.append(f"**Cook Time:** {cook_time.strip()}")
+    prep_min = _parse_minutes(prep_time)
+    cook_min = _parse_minutes(cook_time)
+    if prep_min is not None and cook_min is not None:
+        bits.append(f"**Total Time:** {_format_minutes(prep_min + cook_min)}")
+    if difficulty.strip():
+        bits.append(f"**Difficulty:** {difficulty.strip()}")
+    return " | ".join(bits)
 
 
 def parse_recipe(text):
@@ -305,24 +355,47 @@ def parse_recipe(text):
 
 
 def extract_editable_summary(text):
-    """Everything from the file EXCEPT the title and the Instructions/Step
-    section(s), as raw markdown — this is what pre-fills the Edit form's
-    Summary box. Because it's the original text verbatim (not reconstructed
-    from the parsed/rendered form), a recipe's '## Ingredients' table or
-    '## Notes' section survives an edit unchanged as long as the Summary
-    text itself isn't touched, even though the Edit form never shows those
-    as separate fields."""
+    """Everything from the file EXCEPT the title, the Instructions/Step
+    section(s), and — when there's exactly one plain '## Ingredients'
+    heading (no grouping) — that section, since the Edit form's structured
+    Ingredients list-builder owns it instead. A recipe with ingredients
+    split across several named sections (Sauce/Beef/Noodles, ...) has no
+    single heading the structured box could cleanly own, so those stay
+    here untouched, verbatim, exactly as before — the Edit form's Summary
+    box was always the fallback for anything it doesn't have a dedicated
+    field for."""
     _title, intro_lines, sections = split_sections(text)
     parts = []
     intro = "\n".join(intro_lines).strip()
     if intro:
         parts.append(intro)
+
+    ingredient_heading_count = 0
+    simple_ingredient_heading = None
+    seen_steps_section = False
+    for heading, body in sections:
+        if is_step_section(heading, body):
+            seen_steps_section = True
+            continue
+        non_empty = [l for l in body if l.strip()]
+        bullet_ratio = (sum(1 for l in non_empty if BULLET_RE.match(l)) / len(non_empty)) if non_empty else 0
+        is_ingredient = INGREDIENT_WORD_RE.search(heading) or (
+            bullet_ratio > 0.5 and not seen_steps_section and not NOTES_WORD_RE.search(heading)
+        )
+        if is_ingredient:
+            ingredient_heading_count += 1
+            if INGREDIENT_WORD_RE.search(heading):
+                simple_ingredient_heading = heading
+    skip_heading = simple_ingredient_heading if ingredient_heading_count == 1 else None
+
     for heading, body in sections:
         if is_step_section(heading, body):
             continue
+        if heading == skip_heading:
+            continue
         body_text = "\n".join(body).strip()
         parts.append(f"## {heading}\n\n{body_text}" if body_text else f"## {heading}")
-    return "\n\n".join(parts)
+    return _strip_meta_fields("\n\n".join(parts))
 
 
 def extract_raw_steps(text):
@@ -415,17 +488,22 @@ def load_recipe_raw(slug):
         return f.read()
 
 
-def _build_markdown(title, summary, steps):
+def _build_markdown(title, summary, steps, ingredients="", meta_line=""):
     parts = [f"# {title}\n"]
+    if meta_line.strip():
+        parts.append(f"\n{meta_line.strip()}\n")
     if summary.strip():
         parts.append(f"\n{summary.strip()}\n")
+    ing_lines = [l.strip() for l in ingredients.splitlines() if l.strip()]
+    if ing_lines:
+        parts.append("\n## Ingredients\n\n" + "\n".join(f"- {l}" for l in ing_lines) + "\n")
     step_lines = [l.strip() for l in steps.splitlines() if l.strip()]
     if step_lines:
         parts.append("\n## Instructions\n\n" + "\n".join(f"{i}. {l}" for i, l in enumerate(step_lines, 1)) + "\n")
     return "".join(parts)
 
 
-def save_recipe(title, summary, steps):
+def save_recipe(title, summary, steps, ingredients="", prep_time="", cook_time="", difficulty=""):
     """Creates a new recipe file, picking a free filename off the title."""
     slug = slugify(title)
     path = os.path.join(RECIPES_DIR, slug + ".md")
@@ -434,12 +512,13 @@ def save_recipe(title, summary, steps):
         path = os.path.join(RECIPES_DIR, f"{slug}_{suffix}.md")
         suffix += 1
     os.makedirs(RECIPES_DIR, exist_ok=True)
+    meta_line = _build_meta_line(prep_time, cook_time, difficulty)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(_build_markdown(title, summary, steps))
+        f.write(_build_markdown(title, summary, steps, ingredients, meta_line))
     return os.path.basename(path)[:-3]
 
 
-def update_recipe(slug, title, summary, steps):
+def update_recipe(slug, title, summary, steps, ingredients="", prep_time="", cook_time="", difficulty=""):
     """Overwrites an existing recipe in place — the filename/slug (and so
     its URL) never changes on edit, even if the title does, so links and
     bookmarks keep working."""
@@ -448,8 +527,9 @@ def update_recipe(slug, title, summary, steps):
     path = os.path.join(RECIPES_DIR, slug + ".md")
     if not os.path.isfile(path):
         return False
+    meta_line = _build_meta_line(prep_time, cook_time, difficulty)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(_build_markdown(title, summary, steps))
+        f.write(_build_markdown(title, summary, steps, ingredients, meta_line))
     return True
 
 
@@ -656,13 +736,34 @@ header.top a.back:hover { color: var(--text); }
 
 form.stack { display: flex; flex-direction: column; gap: 0.9rem; max-width: 560px; margin-top: 1.2rem; }
 form.stack label { font-size: 0.82rem; color: var(--text-dim); display: flex; flex-direction: column; gap: 0.35rem; }
-input, textarea {
+input, textarea, select {
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
   color: var(--text); padding: 0.6rem 0.7rem; font-size: 0.95rem; font-family: inherit;
 }
-input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
 textarea { resize: vertical; min-height: 6em; }
+.meta-fields { display: flex; gap: 0.7rem; flex-wrap: wrap; }
+.meta-fields label { flex: 1; min-width: 120px; }
 .hint { color: var(--text-dim); font-size: 0.78rem; }
+
+.list-adder { display: flex; gap: 0.6rem; }
+.list-adder input { flex: 1; }
+.list-adder button {
+  padding: 0.6rem 1.1rem; border-radius: 8px; font-weight: 600; font-size: 0.9rem;
+  border: 1px solid var(--border); background: var(--gradient); color: #04211D; cursor: pointer; flex: none;
+}
+.item-list { list-style: none; margin: 0.7rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.item-list li {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.6rem;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.5rem 0.7rem; font-size: 0.9rem;
+}
+.item-list .item-text { flex: 1; }
+.item-remove {
+  background: transparent; border: none; color: var(--text-dim); font-size: 1rem;
+  cursor: pointer; padding: 0 0.3rem; flex: none;
+}
+.item-remove:hover { color: var(--danger); }
 
 /* --- Match cards ("What Can I Make?") ----------------------------------- */
 .match-card {
@@ -820,11 +921,102 @@ CONFIRM_MODAL = (
 )
 
 
+# Ingredients and Steps on the New/Edit forms are both "type one, click Add,
+# repeat" list builders rather than a single multi-line textarea — the
+# visible <ul> is pure JS state; a hidden textarea (still a real form field)
+# is what actually submits, newline-joined, matching the one-item-per-line
+# convention _build_markdown/extract_raw_steps already use everywhere else.
+LIST_BUILDER_SCRIPT = (
+    "<script>"
+    "(function(){"
+    "function initListBuilder(prefix){"
+    "var input=document.getElementById(prefix+'Input');"
+    "var addBtn=document.getElementById(prefix+'AddBtn');"
+    "var list=document.getElementById(prefix+'List');"
+    "var field=document.getElementById(prefix+'Field');"
+    "var items=(field.value||'').split('\\n').map(function(s){return s.trim();}).filter(Boolean);"
+    "function render(){"
+    "list.innerHTML='';"
+    "items.forEach(function(item,idx){"
+    "var li=document.createElement('li');"
+    "var span=document.createElement('span');"
+    "span.className='item-text'; span.textContent=item;"
+    "var rm=document.createElement('button');"
+    "rm.type='button'; rm.className='item-remove'; rm.setAttribute('aria-label','Remove');"
+    "rm.textContent='\\u2715';"
+    "rm.addEventListener('click',function(){ items.splice(idx,1); sync(); });"
+    "li.appendChild(span); li.appendChild(rm);"
+    "list.appendChild(li);"
+    "});"
+    "}"
+    "function sync(){ field.value=items.join('\\n'); render(); }"
+    "function addItem(){"
+    "var v=input.value.trim();"
+    "if(v){ items.push(v); input.value=''; sync(); input.focus(); }"
+    "}"
+    "addBtn.addEventListener('click',addItem);"
+    "input.addEventListener('keydown',function(e){"
+    "if(e.key==='Enter'){ e.preventDefault(); addItem(); }"
+    "});"
+    "render();"
+    "}"
+    "initListBuilder('ingredients');"
+    "initListBuilder('steps');"
+    "})();"
+    "</script>"
+)
+
+
+def _list_builder_field(name, label, placeholder, add_label, initial_items=(), hint=""):
+    initial_value = html.escape("\n".join(initial_items))
+    hint_html = f"<span class='hint'>{html.escape(hint)}</span>" if hint else ""
+    return (
+        f"<label>{html.escape(label)}"
+        f"<div class='list-adder'>"
+        f"<input type='text' id='{name}Input' placeholder='{html.escape(placeholder)}'>"
+        f"<button type='button' id='{name}AddBtn'>{html.escape(add_label)}</button>"
+        f"</div>"
+        f"<ul class='item-list' id='{name}List'></ul>"
+        f"<textarea name='{name}' id='{name}Field' hidden>{initial_value}</textarea>"
+        f"{hint_html}"
+        f"</label>"
+    )
+
+
+_DIFFICULTY_OPTIONS = ["", "Easy", "Medium", "Hard"]
+
+
+def _meta_fields_html(prep_time="", cook_time="", difficulty=""):
+    difficulty_l = difficulty.strip().lower()
+    options = "".join(
+        f"<option value='{html.escape(opt)}'{' selected' if opt.lower() == difficulty_l else ''}>"
+        f"{html.escape(opt) if opt else 'Not set'}</option>"
+        for opt in _DIFFICULTY_OPTIONS
+    )
+    return (
+        "<div class='meta-fields'>"
+        f"<label>Prep Time<input name='prep_time' value='{html.escape(prep_time)}' placeholder='e.g. 15 min'></label>"
+        f"<label>Cook Time<input name='cook_time' value='{html.escape(cook_time)}' placeholder='e.g. 20 min'></label>"
+        f"<label>Difficulty<select name='difficulty'>{options}</select></label>"
+        "</div>"
+        "<span class='hint'>Total Time is added up from Prep + Cook automatically.</span>"
+    )
+
+
 def page(title, body_html, back_href=None, back_label=None):
-    back = f"<a class='back' href='{back_href}'>&larr; {html.escape(back_label or 'Back')}</a>" if back_href else ""
+    # title=None skips the header entirely — used on the home page, where
+    # the Android app's own native toolbar already shows "My Kitchen / by
+    # Ned Nguyen" right above this content, so an in-page heading here
+    # would just repeat it. The browser tab title (set once in HEAD, not
+    # per-page) still says "My Kitchen" regardless.
+    if title is None:
+        header = ""
+    else:
+        back = f"<a class='back' href='{back_href}'>&larr; {html.escape(back_label or 'Back')}</a>" if back_href else ""
+        header = f"<header class='top'>{back}<div class='brand'><h1>{html.escape(title)}</h1></div></header>"
     return (
         f"<!doctype html><html><head>{HEAD}</head><body><div class='wrap'>"
-        f"<header class='top'>{back}<div class='brand'><h1>{html.escape(title)}</h1></div></header>"
+        f"{header}"
         f"{body_html}"
         f"</div>{CONFIRM_MODAL}</body></html>"
     )
@@ -901,7 +1093,7 @@ def render_home(page_num=1, q=None, difficulty=None, time_bucket=None):
             f"<code>{html.escape(RECIPES_DIR)}</code>, or type one in.</p>"
             f"{top_actions}"
         )
-        return page("My Kitchen", body)
+        return page(None, body)
 
     search_bar = (
         f"<form class='search-bar' method='get' action='/'>"
@@ -941,7 +1133,7 @@ def render_home(page_num=1, q=None, difficulty=None, time_bucket=None):
             + "<p class='empty'>No recipes match those filters.</p>"
             + new_recipe_btn
         )
-        return page("My Kitchen", body)
+        return page(None, body)
 
     total_pages = max(1, -(-len(recipes) // RECIPES_PER_PAGE))  # ceiling division
     page_num = max(1, min(page_num, total_pages))
@@ -997,7 +1189,7 @@ def render_home(page_num=1, q=None, difficulty=None, time_bucket=None):
         )
 
     body = top_actions + search_bar + filter_bar + "".join(cards) + pager + new_recipe_btn
-    return page("My Kitchen", body)
+    return page(None, body)
 
 
 def render_recipe(slug):
@@ -1271,12 +1463,20 @@ def render_new_recipe_form():
     body = (
         "<form class='stack' method='post' action='/recipes/new'>"
         "<label>Title<input name='title' placeholder='Grandma’s Fried Rice' required></label>"
-        "<label>Steps<textarea name='steps' placeholder='Heat oil in a wok over high heat&#10;Scramble the eggs, then set aside&#10;Add rice and stir-fry 3 minutes' required></textarea>"
-        "<span class='hint'>One step per line — each line becomes its own card in the step-by-step / cooking view.</span></label>"
-        "<label>Summary (optional)<textarea name='summary' placeholder='A quick one-pan weeknight fried rice with whatever vegetables are in the fridge.'></textarea>"
-        "<span class='hint'>Ingredients, timing, notes — whatever’s worth knowing before you start. Shown at the top of the recipe.</span></label>"
+        + _meta_fields_html()
+        + _list_builder_field(
+            "ingredients", "Ingredients", "e.g. 2 cups jasmine rice", "Add",
+            hint="Type one ingredient, click Add, repeat.",
+        )
+        + _list_builder_field(
+            "steps", "Steps", "e.g. Heat oil in a wok over high heat", "Add Step",
+            hint="Type one step, click Add Step, repeat — each becomes its own card in the cooking view.",
+        )
+        + "<label>Summary (optional)<textarea name='summary' placeholder='A quick one-pan weeknight fried rice with whatever vegetables are in the fridge.'></textarea>"
+        "<span class='hint'>Timing, notes, anything else worth knowing before you start. Shown at the top of the recipe.</span></label>"
         "<div class='actions'><button class='btn primary' type='submit'>Save recipe</button></div>"
         "</form>"
+        + LIST_BUILDER_SCRIPT
     )
     return page("New Recipe", body, back_href="/", back_label="My Kitchen")
 
@@ -1288,8 +1488,21 @@ def render_edit_form(slug):
     r = parse_recipe(raw)
     title = html.escape(r["title"])
     summary = html.escape(extract_editable_summary(raw))
-    steps = html.escape("\n".join(extract_raw_steps(raw)))
     slug_q = quote(slug, safe="")
+
+    # The structured Ingredients box can only cleanly own a recipe with one
+    # plain (ungrouped) '## Ingredients' section — see extract_editable_summary.
+    # Anything split across several named sections (Sauce/Beef/Noodles, ...)
+    # keeps living in Summary above, verbatim, and this box starts empty
+    # rather than risk silently flattening/losing that grouping on save.
+    groups = r["ingredient_groups"]
+    simple_ingredients = groups[0][1] if len(groups) == 1 and groups[0][0] is None else []
+    ingredients_hint = (
+        "Type one ingredient, click Add, repeat."
+        if not groups or simple_ingredients
+        else "This recipe's ingredients are grouped (Sauce/Beef/...) and stay in Summary above — "
+             "anything added here becomes a separate plain list alongside them."
+    )
 
     delete_msg = html.escape(f'Move "{r["title"]}" to trash? You can restore it later.')
 
@@ -1297,15 +1510,28 @@ def render_edit_form(slug):
         f"<form class='stack' method='post' action='/recipe/{slug_q}/edit' "
         f"onsubmit='return confirmAction(this, \"Save changes to this recipe?\")'>"
         f"<label>Title<input name='title' value='{title}' required></label>"
-        f"<label>Steps<textarea name='steps' required>{steps}</textarea>"
-        f"<span class='hint'>One step per line — each line becomes its own card in the step-by-step / cooking view.</span></label>"
-        f"<label>Summary (optional)<textarea name='summary'>{summary}</textarea>"
-        f"<span class='hint'>Ingredients, timing, notes — whatever’s worth knowing before you start. Shown at the top of the recipe.</span></label>"
+        + _meta_fields_html(
+            prep_time=r["meta"]["prep_time"] or "",
+            cook_time=r["meta"]["cook_time"] or "",
+            difficulty=r["meta"]["difficulty"] or "",
+        )
+        + _list_builder_field(
+            "ingredients", "Ingredients", "e.g. 2 cups jasmine rice", "Add",
+            initial_items=simple_ingredients, hint=ingredients_hint,
+        )
+        + _list_builder_field(
+            "steps", "Steps", "e.g. Heat oil in a wok over high heat", "Add Step",
+            initial_items=extract_raw_steps(raw),
+            hint="Type one step, click Add Step, repeat — each becomes its own card in the cooking view.",
+        )
+        + f"<label>Summary (optional)<textarea name='summary'>{summary}</textarea>"
+        f"<span class='hint'>Timing, notes, anything else worth knowing before you start. Shown at the top of the recipe.</span></label>"
         f"<div class='actions'>"
         f"<button class='btn primary' type='submit'>Save changes</button>"
         f"<a class='btn' href='/recipe/{slug_q}'>Cancel</a>"
         f"</div>"
         f"</form>"
+        f"{LIST_BUILDER_SCRIPT}"
         f"<div class='actions'>"
         f"<form method='post' action='/recipe/{slug_q}/delete'>"
         f"<button type='submit' class='btn danger' data-confirm='{delete_msg}' "
@@ -1496,6 +1722,10 @@ class Handler(BaseHTTPRequestHandler):
                 title=title,
                 summary=form.get("summary", ""),
                 steps=form.get("steps", ""),
+                ingredients=form.get("ingredients", ""),
+                prep_time=form.get("prep_time", ""),
+                cook_time=form.get("cook_time", ""),
+                difficulty=form.get("difficulty", ""),
             )
             return self._redirect(f"/recipe/{quote(slug, safe='')}")
 
@@ -1507,7 +1737,13 @@ class Handler(BaseHTTPRequestHandler):
             title = form.get("title", "").strip()
             if not title:
                 return self._redirect(f"/recipe/{quote(slug, safe='')}/edit")
-            ok = update_recipe(slug, title=title, summary=form.get("summary", ""), steps=form.get("steps", ""))
+            ok = update_recipe(
+                slug, title=title, summary=form.get("summary", ""),
+                steps=form.get("steps", ""), ingredients=form.get("ingredients", ""),
+                prep_time=form.get("prep_time", ""),
+                cook_time=form.get("cook_time", ""),
+                difficulty=form.get("difficulty", ""),
+            )
             return self._redirect(f"/recipe/{quote(slug, safe='')}") if ok else self._not_found()
 
         if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "delete":
