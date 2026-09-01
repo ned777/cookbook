@@ -1084,17 +1084,27 @@ textarea { resize: vertical; min-height: 6em; }
 /* --- Recipe photos: teaser grid, full list, lightbox -------------------- */
 .recipe-photo { cursor: zoom-in; display: block; }
 
-.photo-strip { display: flex; gap: 0.6rem; overflow-x: auto; padding-bottom: 0.2rem; margin-bottom: 1.1rem; -webkit-overflow-scrolling: touch; }
+.photo-strip-wrap { position: relative; margin-bottom: 1.1rem; }
+.photo-strip { display: flex; gap: 0.6rem; overflow-x: auto; padding-bottom: 0.2rem; -webkit-overflow-scrolling: touch; scroll-behavior: smooth; }
 .photo-strip-item {
-  flex: 0 0 92px; width: 92px; height: 92px; border-radius: 12px; overflow: hidden;
+  flex: 0 0 calc((100% - 1.2rem) / 3); aspect-ratio: 1; border-radius: 12px; overflow: hidden;
   border: 1px solid var(--border);
 }
 .photo-strip-item img.recipe-photo { width: 100%; height: 100%; object-fit: cover; }
 .photo-strip-more {
-  background: var(--surface-2); color: var(--text); font-weight: 700; font-size: 0.72rem;
+  background: var(--surface-2); color: var(--text); font-weight: 700; font-size: 0.85rem;
   line-height: 1.3; text-align: center; display: flex; align-items: center; justify-content: center;
   cursor: pointer; font-family: inherit; padding: 0;
 }
+.photo-strip-arrow {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 5;
+  width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border);
+  background: rgba(10, 10, 10, 0.75); color: var(--text); font-size: 1rem;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.photo-strip-arrow[hidden] { display: none; }
+.photo-strip-prev { left: 0.3rem; }
+.photo-strip-next { right: 0.3rem; }
 
 .photo-gallery-modal {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.85); z-index: 1050;
@@ -1343,6 +1353,21 @@ PHOTO_LIGHTBOX = (
     "modal.addEventListener('click',function(e){ if(e.target===modal) modal.hidden=true; });"
     "var closeBtn=modal.querySelector('.photo-gallery-modal-close');"
     "if(closeBtn) closeBtn.addEventListener('click',function(){ modal.hidden=true; });"
+    "});"
+    "document.querySelectorAll('.photo-strip-wrap').forEach(function(wrap){"
+    "var strip=wrap.querySelector('.photo-strip');"
+    "var prevBtn=wrap.querySelector('.photo-strip-prev');"
+    "var nextBtn=wrap.querySelector('.photo-strip-next');"
+    "if(!strip||!prevBtn||!nextBtn) return;"
+    "function updateArrows(){"
+    "prevBtn.hidden=strip.scrollLeft<=4;"
+    "nextBtn.hidden=strip.scrollLeft+strip.clientWidth>=strip.scrollWidth-4;"
+    "}"
+    "prevBtn.addEventListener('click',function(){ strip.scrollBy({left:-strip.clientWidth*0.9,behavior:'smooth'}); });"
+    "nextBtn.addEventListener('click',function(){ strip.scrollBy({left:strip.clientWidth*0.9,behavior:'smooth'}); });"
+    "strip.addEventListener('scroll',updateArrows);"
+    "window.addEventListener('resize',updateArrows);"
+    "updateArrows();"
     "});"
     "})();"
     "</script>"
@@ -1741,7 +1766,13 @@ def _photo_strip_html(slug, photos):
             "</div></div>"
         )
 
-    return f"<div class='photo-strip'>{''.join(items)}</div>{modal_html}"
+    return (
+        "<div class='photo-strip-wrap'>"
+        "<button type='button' class='photo-strip-arrow photo-strip-prev' aria-label='Scroll left' hidden>&larr;</button>"
+        f"<div class='photo-strip'>{''.join(items)}</div>"
+        "<button type='button' class='photo-strip-arrow photo-strip-next' aria-label='Scroll right' hidden>&rarr;</button>"
+        f"</div>{modal_html}"
+    )
 
 
 def _photo_manage_html(slug, photos):
