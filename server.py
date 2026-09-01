@@ -19,6 +19,10 @@ COOKBOOK_PHOTOS_DIR) rather than mixed in alongside the .md files themselves.
 
 Run:  python3 server.py
 Serves on 0.0.0.0:8092, protected by HTTP Basic Auth.
+
+Pillow is used for photo thumbnails when it happens to be installed, but
+it's a soft optional — nothing here fails or needs a requirements.txt
+without it, photo pages just serve full-size images instead.
 """
 import base64
 import email
@@ -26,8 +30,20 @@ import html
 import json
 import os
 import re
+import shutil
 import struct
 import unicodedata
+
+# Thumbnails are a nice-to-have, not a requirement — everything still works
+# at full size without Pillow installed, just without the memory/bandwidth
+# savings on pages with photos. Kept as a soft try/except rather than a
+# hard requirements.txt entry so "nothing to pip install" stays true for
+# anyone who doesn't care about this optimization.
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse, quote, unquote
@@ -700,23 +716,57 @@ def add_recipe_photo(slug, filename, data):
     out_name = _unique_photo_name(d, when.strftime("%Y-%m-%d_%H-%M-%S"), ext)
     with open(os.path.join(d, out_name), "wb") as f:
         f.write(data)
+    _ensure_thumbnail(d, out_name)  # generated now, not on first page view
+
+
+THUMBNAIL_MAX_DIM = 480
+
+
+def _thumbnail_path(photos_dir, filename):
+    return os.path.join(photos_dir, ".thumbs", os.path.splitext(filename)[0] + ".jpg")
+
+
+def _ensure_thumbnail(photos_dir, filename):
+    """Generates and caches a small JPEG thumbnail so the gallery grid
+    doesn't ship full-resolution photos just to show a 160-260px tile —
+    tapping a photo still loads the original at full size. Best-effort:
+    if Pillow isn't installed, or a particular file fails to decode for
+    any reason, this quietly returns None and callers fall back to
+    serving the original — never a broken image over a missing thumbnail.
+    """
+    if not HAS_PIL:
+        return None
+    thumb_path = _thumbnail_path(photos_dir, filename)
+    if os.path.isfile(thumb_path):
+        return thumb_path
+    src_path = os.path.join(photos_dir, filename)
+    try:
+        os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
+        with Image.open(src_path) as img:
+            img = img.convert("RGB")
+            img.thumbnail((THUMBNAIL_MAX_DIM, THUMBNAIL_MAX_DIM))
+            img.save(thumb_path, "JPEG", quality=82)
+        return thumb_path
+    except Exception:
+        return None
 
 
 def delete_recipe_photo(slug, filename):
     if not _valid_slug(slug) or not filename or filename != os.path.basename(filename):
         return
-    path = os.path.join(_recipe_photos_dir(slug), filename)
+    d = _recipe_photos_dir(slug)
+    path = os.path.join(d, filename)
     if os.path.isfile(path):
         os.remove(path)
+    thumb_path = _thumbnail_path(d, filename)
+    if os.path.isfile(thumb_path):
+        os.remove(thumb_path)
 
 
 def delete_all_recipe_photos(slug):
     d = _recipe_photos_dir(slug)
-    if not os.path.isdir(d):
-        return
-    for name in os.listdir(d):
-        os.remove(os.path.join(d, name))
-    os.rmdir(d)
+    if os.path.isdir(d):
+        shutil.rmtree(d)
 
 
 def extract_jpeg_datetime(data):
@@ -1237,7 +1287,7 @@ PHOTO_LIGHTBOX = (
     "function show(i){"
     "if(!thumbs.length) return;"
     "idx=Math.max(0,Math.min(i,thumbs.length-1));"
-    "img.src=thumbs[idx].src;"
+    "img.src=thumbs[idx].getAttribute('data-full-src')||thumbs[idx].src;"
     "caption.textContent=thumbs[idx].getAttribute('data-caption')||'';"
     "prevBtn.hidden=idx===0;"
     "nextBtn.hidden=idx===thumbs.length-1;"
@@ -1607,6 +1657,17 @@ def _format_photo_label(when, source):
     return f"{verb} on {when.strftime('%Y-%b-%d')} {when.strftime('%H:%M')}"
 
 
+def _photo_img_tag(slug_q, filename_q, label):
+    """The thumbnail (?thumb=1, generated on demand and cached) is what
+    actually loads on the page; the lightbox reads data-full-src to fetch
+    the untouched original only once you tap in for a closer look."""
+    base = f"/recipe/{slug_q}/photo/{filename_q}"
+    return (
+        f"<img class='recipe-photo' src='{base}?thumb=1' data-full-src='{base}' "
+        f"data-caption='{label}' loading='lazy' alt=''>"
+    )
+
+
 def _photo_grid_html(slug, photos):
     """Teaser grid at the top of the recipe page: one big photo, two side
     by side, three wrapping to a second row, or — four or more — the
@@ -1627,8 +1688,8 @@ def _photo_grid_html(slug, photos):
         filename_q = quote(p["filename"], safe="")
         tiles.append(
             "<div class='photo-tile'>"
-            f"<img class='recipe-photo' src='/recipe/{slug_q}/photo/{filename_q}' data-caption='{label}' alt=''>"
-            "</div>"
+            + _photo_img_tag(slug_q, filename_q, label)
+            + "</div>"
         )
     if count >= 4:
         tiles.append(
@@ -1653,8 +1714,8 @@ def render_photos_page(slug):
             filename_q = quote(p["filename"], safe="")
             items.append(
                 "<div class='photo-list-item'>"
-                f"<img class='recipe-photo' src='/recipe/{slug_q}/photo/{filename_q}' data-caption='{label}' alt=''>"
-                f"<div class='photo-list-caption'>{label}</div>"
+                + _photo_img_tag(slug_q, filename_q, label)
+                + f"<div class='photo-list-caption'>{label}</div>"
                 "</div>"
             )
         body = f"<div class='photo-list'>{''.join(items)}</div>"
@@ -1675,8 +1736,8 @@ def _photo_manage_html(slug, photos):
         delete_msg = html.escape("Delete this photo? This can't be undone.")
         items.append(
             "<div class='photo-list-item'>"
-            f"<img class='recipe-photo' src='/recipe/{slug_q}/photo/{filename_q}' data-caption='{label}' alt=''>"
-            f"<div class='photo-list-caption'>{label}</div>"
+            + _photo_img_tag(slug_q, filename_q, label)
+            + f"<div class='photo-list-caption'>{label}</div>"
             f"<form method='post' action='/recipe/{slug_q}/photo/delete'>"
             f"<input type='hidden' name='filename' value='{html.escape(p['filename'])}'>"
             f"<button type='submit' class='btn danger' data-confirm='{delete_msg}' "
@@ -2214,10 +2275,16 @@ class Handler(BaseHTTPRequestHandler):
             slug, filename = parts[1], parts[3]
             if not _valid_slug(slug) or filename != os.path.basename(filename):
                 return self._not_found()
-            path = os.path.join(_recipe_photos_dir(slug), filename)
+            photos_dir = _recipe_photos_dir(slug)
+            path = os.path.join(photos_dir, filename)
             if not os.path.isfile(path):
                 return self._not_found()
             ext = os.path.splitext(filename)[1].lstrip(".").lower()
+            want_thumb = parse_qs(parsed_url.query).get("thumb", ["0"])[0] == "1"
+            if want_thumb:
+                thumb_path = _ensure_thumbnail(photos_dir, filename)
+                if thumb_path:
+                    path, ext = thumb_path, "jpg"
             with open(path, "rb") as f:
                 data = f.read()
             self.send_response(200)
