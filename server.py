@@ -40,7 +40,7 @@ import unicodedata
 # hard requirements.txt entry so "nothing to pip install" stays true for
 # anyone who doesn't care about this optimization.
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -743,6 +743,13 @@ def _ensure_thumbnail(photos_dir, filename):
     try:
         os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
         with Image.open(src_path) as img:
+            # A phone photo is often stored in the sensor's native
+            # orientation with an EXIF tag saying how to rotate it for
+            # display — browsers apply that automatically when showing the
+            # original file directly, but Pillow does not do this on its
+            # own, so a thumbnail built from the raw pixels comes out
+            # rotated relative to what the original looks like.
+            img = ImageOps.exif_transpose(img)
             img = img.convert("RGB")
             img.thumbnail((THUMBNAIL_MAX_DIM, THUMBNAIL_MAX_DIM))
             img.save(thumb_path, "JPEG", quality=82)
@@ -1076,23 +1083,34 @@ textarea { resize: vertical; min-height: 6em; }
 
 /* --- Recipe photos: teaser grid, full list, lightbox -------------------- */
 .recipe-photo { cursor: zoom-in; display: block; }
-.photo-grid { display: grid; grid-template-columns: 1fr; gap: 0.5rem; margin-bottom: 1.1rem; }
-.photo-grid[data-count="2"], .photo-grid[data-count="3"], .photo-grid[data-count="4plus"] {
-  grid-template-columns: 1fr 1fr;
+
+.photo-strip { display: flex; gap: 0.6rem; overflow-x: auto; padding-bottom: 0.2rem; margin-bottom: 1.1rem; -webkit-overflow-scrolling: touch; }
+.photo-strip-item {
+  flex: 0 0 92px; width: 92px; height: 92px; border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--border);
 }
-.photo-tile {
-  position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--border);
+.photo-strip-item img.recipe-photo { width: 100%; height: 100%; object-fit: cover; }
+.photo-strip-more {
+  background: var(--surface-2); color: var(--text); font-weight: 700; font-size: 0.72rem;
+  line-height: 1.3; text-align: center; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; font-family: inherit; padding: 0;
 }
-.photo-grid[data-count="1"] .photo-tile { height: 260px; }
-.photo-grid[data-count="2"] .photo-tile,
-.photo-grid[data-count="3"] .photo-tile,
-.photo-grid[data-count="4plus"] .photo-tile { height: 160px; }
-.photo-tile img.recipe-photo { width: 100%; height: 100%; object-fit: cover; }
-.photo-tile.see-more { cursor: pointer; }
-.photo-tile.see-more .see-more-label {
-  position: absolute; inset: 0; background: rgba(45, 212, 191, 0.88); color: #052420;
-  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.95rem;
+
+.photo-gallery-modal {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.85); z-index: 1050;
+  display: flex; align-items: center; justify-content: center; padding: 1.5rem;
 }
+.photo-gallery-modal[hidden] { display: none; }
+.photo-gallery-modal-inner {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+  padding: 1.4rem; max-width: 480px; width: 100%; max-height: 80vh; overflow-y: auto; position: relative;
+}
+.photo-gallery-modal-close { position: absolute; top: -14px; right: -14px; }
+.photo-gallery-modal-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(85px, 1fr)); gap: 0.6rem;
+}
+.photo-gallery-modal-grid .photo-strip-item { width: 100%; height: 85px; flex: none; }
+
 .photo-list { display: flex; flex-direction: column; gap: 1rem; margin: 1rem 0; }
 .photo-list-item img.recipe-photo {
   width: 100%; max-height: 320px; object-fit: cover; border-radius: 14px; border: 1px solid var(--border);
@@ -1315,6 +1333,17 @@ PHOTO_LIGHTBOX = (
     "if(Math.abs(dx)>50){ if(dx<0) show(idx+1); else show(idx-1); }"
     "sx=null;"
     "},{passive:true});"
+    "document.querySelectorAll('.photo-strip-more[data-modal-target]').forEach(function(btn){"
+    "btn.addEventListener('click',function(){"
+    "var modal=document.getElementById(btn.getAttribute('data-modal-target'));"
+    "if(modal) modal.hidden=false;"
+    "});"
+    "});"
+    "document.querySelectorAll('.photo-gallery-modal').forEach(function(modal){"
+    "modal.addEventListener('click',function(e){ if(e.target===modal) modal.hidden=true; });"
+    "var closeBtn=modal.querySelector('.photo-gallery-modal-close');"
+    "if(closeBtn) closeBtn.addEventListener('click',function(){ modal.hidden=true; });"
+    "});"
     "})();"
     "</script>"
 )
@@ -1668,58 +1697,51 @@ def _photo_img_tag(slug_q, filename_q, label):
     )
 
 
-def _photo_grid_html(slug, photos):
-    """Teaser grid at the top of the recipe page: one big photo, two side
-    by side, three wrapping to a second row, or — four or more — the
-    newest 3 plus a square 'See more' tile linking to the full gallery.
-    Newest first, since that's the one you actually opened this page to
-    check against what's in the pan right now."""
+PHOTO_STRIP_LIMIT = 5
+
+
+def _photo_strip_html(slug, photos):
+    """A small horizontally-scrolling row of thumbnails at the top of the
+    recipe page — newest first, since that's the one you opened this page
+    to check against what's in the pan right now. Shows up to 5 directly;
+    with more than that, a 'View more' tile at the end pops the full
+    gallery in a modal instead of growing the strip further. The modal
+    only needs to hold the 6th photo onward — the first 5 already live in
+    the strip, and both sets of thumbnails share one page-wide lightbox
+    (see PHOTO_LIGHTBOX), so scrolling past photo 5 there continues
+    straight into photo 6 rather than starting over."""
     if not photos:
         return ""
     newest_first = list(reversed(photos))
     slug_q = quote(slug, safe="")
-    count = len(newest_first)
-    count_key = {1: "1", 2: "2", 3: "3"}.get(count, "4plus")
-    shown = newest_first[:3] if count >= 4 else newest_first
+    shown, rest = newest_first[:PHOTO_STRIP_LIMIT], newest_first[PHOTO_STRIP_LIMIT:]
 
-    tiles = []
+    items = []
     for p in shown:
         label = html.escape(_format_photo_label(p["when"], p["source"]))
         filename_q = quote(p["filename"], safe="")
-        tiles.append(
-            "<div class='photo-tile'>"
-            + _photo_img_tag(slug_q, filename_q, label)
-            + "</div>"
-        )
-    if count >= 4:
-        tiles.append(
-            f"<a class='photo-tile see-more' href='/recipe/{slug_q}/photos'>"
-            "<span class='see-more-label'>See more</span></a>"
-        )
-    return f"<div class='photo-grid' data-count='{count_key}'>{''.join(tiles)}</div>"
+        items.append(f"<div class='photo-strip-item'>{_photo_img_tag(slug_q, filename_q, label)}</div>")
 
-
-def render_photos_page(slug):
-    r = load_recipe(slug)
-    if r is None:
-        return None
-    slug_q = quote(slug, safe="")
-    photos = list(reversed(list_recipe_photos(slug)))
-    if not photos:
-        body = "<p class='empty'>No photos yet.</p>"
-    else:
-        items = []
-        for p in photos:
+    modal_html = ""
+    if rest:
+        items.append(
+            "<button type='button' class='photo-strip-item photo-strip-more' "
+            f"data-modal-target='photoGalleryModal-{slug_q}'>+{len(rest)}<br>View more</button>"
+        )
+        rest_items = []
+        for p in rest:
             label = html.escape(_format_photo_label(p["when"], p["source"]))
             filename_q = quote(p["filename"], safe="")
-            items.append(
-                "<div class='photo-list-item'>"
-                + _photo_img_tag(slug_q, filename_q, label)
-                + f"<div class='photo-list-caption'>{label}</div>"
-                "</div>"
-            )
-        body = f"<div class='photo-list'>{''.join(items)}</div>"
-    return page(f"Photos — {r['title']}", body, back_href=f"/recipe/{slug_q}", back_label=r["title"])
+            rest_items.append(f"<div class='photo-strip-item'>{_photo_img_tag(slug_q, filename_q, label)}</div>")
+        modal_html = (
+            f"<div class='photo-gallery-modal' id='photoGalleryModal-{slug_q}' hidden>"
+            "<div class='photo-gallery-modal-inner'>"
+            "<button type='button' class='photo-lightbox-close photo-gallery-modal-close' aria-label='Close'>&times;</button>"
+            f"<div class='photo-gallery-modal-grid'>{''.join(rest_items)}</div>"
+            "</div></div>"
+        )
+
+    return f"<div class='photo-strip'>{''.join(items)}</div>{modal_html}"
 
 
 def _photo_manage_html(slug, photos):
@@ -1779,7 +1801,7 @@ def render_recipe(slug):
         f"</div>"
     )
 
-    photo_html = _photo_grid_html(r["slug"], list_recipe_photos(r["slug"]))
+    photo_html = _photo_strip_html(r["slug"], list_recipe_photos(r["slug"]))
     uploader_html = _photo_uploader_html(r["slug"])
 
     body = (
@@ -2267,9 +2289,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_html(render_trash())
         if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "edit":
             out = render_edit_form(parts[1])
-            return self._send_html(out) if out else self._not_found()
-        if len(parts) == 3 and parts[0] == "recipe" and parts[2] == "photos":
-            out = render_photos_page(parts[1])
             return self._send_html(out) if out else self._not_found()
         if len(parts) == 4 and parts[0] == "recipe" and parts[2] == "photo":
             slug, filename = parts[1], parts[3]
