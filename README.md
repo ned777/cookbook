@@ -55,6 +55,18 @@ update.
 - A subfolder like `Original sources/` (or `.trash`) is ignored — only
   files directly in the Cooking folder are treated as live recipes.
 
+## Screenshots
+
+<p>
+  <img src="screenshots/recipe-detail-desktop.png" width="45%" alt="A recipe's overview page in a desktop browser" />
+  <img src="screenshots/recipe-detail-mobile.jpg" width="45%" alt="The same kind of overview page in the Android app" />
+</p>
+<p>
+  <img src="screenshots/cooking-mode-step.jpg" width="30%" alt="Cooking mode showing one step as a card" />
+  <img src="screenshots/cooking-mode-timer.jpg" width="30%" alt="Cooking mode's built-in timer overlay" />
+  <img src="screenshots/edit-recipe.jpg" width="30%" alt="Editing a recipe's title, times, difficulty, and ingredients" />
+</p>
+
 ## Running it
 
 Needs nothing but Python 3 — no `pip install`, no virtualenv.
