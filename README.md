@@ -58,7 +58,10 @@ update.
 ## Screenshots
 
 <p>
+  <img src="screenshots/recipe-list-desktop.png" width="45%" alt="The recipe list with search and filter controls, in a desktop browser" />
   <img src="screenshots/recipe-detail-desktop.png" width="45%" alt="A recipe's overview page in a desktop browser" />
+</p>
+<p>
   <img src="screenshots/recipe-detail-mobile.jpg" width="45%" alt="The same kind of overview page in the Android app" />
 </p>
 <p>
