@@ -1316,8 +1316,8 @@ textarea { resize: vertical; min-height: 6em; }
 .step-nav { display: flex; gap: 0.8rem; padding: 0 1.25rem 1.5rem; flex: none; }
 .step-arrow {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  padding: 1.4rem; border-radius: 16px; border: 1px solid var(--border);
-  background: var(--surface); color: var(--text); font-size: 2rem;
+  padding: 0.55rem 1rem; border-radius: 12px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 1.3rem;
   -webkit-tap-highlight-color: transparent; user-select: none;
   -webkit-appearance: none; appearance: none; font-family: inherit; cursor: pointer; margin: 0;
 }
@@ -1374,7 +1374,7 @@ textarea { resize: vertical; min-height: 6em; }
   form.stack { max-width: 620px; gap: 1.2rem; }
   input, textarea { font-size: 1.05rem; padding: 0.7rem 0.85rem; }
   .card-text { font-size: 2.1rem; }
-  .step-arrow { font-size: 2.6rem; padding: 2rem; }
+  .step-arrow { font-size: 1.5rem; padding: 0.7rem 1.2rem; }
   .match-pct { font-size: 1.7rem; }
 }
 """

@@ -121,12 +121,9 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView, url: String?) {
                 binding.loadingBar.visibility = android.view.View.GONE
-                binding.swipeRefresh.isRefreshing = false
                 setKeepScreenOn(url)
             }
         }
-
-        binding.swipeRefresh.setOnRefreshListener { binding.webView.reload() }
 
         loadServer()
 
@@ -155,6 +152,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == R.id.action_refresh) {
+            binding.webView.reload()
+            return true
+        }
         if (item.itemId == R.id.action_settings) {
             startActivity(Intent(this, SetupActivity::class.java))
             return true
