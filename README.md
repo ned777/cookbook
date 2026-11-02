@@ -24,7 +24,8 @@ update.
 - **Serving size** — a +/− stepper above the ingredients rescales every
   amount, and cooking mode carries the same count into the steps. Times,
   temperatures, and sizes like "2-inch pieces" stay put: in a step, only a
-  number with a volume/weight unit changes. A recipe needs a
+  number with a volume/weight unit changes. The Servings and Calories
+  values at the top of the recipe follow along too. A recipe needs a
   `**Servings:** 4` line and amounts in its ingredient list to get one.
 - **Cooking mode** — a full-black, flashcard-style deck: one step per
   card, a big arrow on each side to slide forward/back, or just swipe

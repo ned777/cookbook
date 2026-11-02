@@ -186,6 +186,22 @@ def mark_amounts(fragment, lead=False):
     return "".join(parts)
 
 
+_META_AMOUNT_RE = re.compile(
+    r"(?P<label><strong>(?:Servings|Calories):?</strong>:?\s*)"
+    r"(?P<lo>\d+)(?:(?P<sep>\s*[-–]\s*)(?P<hi>\d+))?(?![\d,])",
+    re.IGNORECASE,
+)
+_BYLINE_SERVINGS_RE = re.compile(r"(?<![\w.])(?P<lo>\d+)(?P<sep>)(?P<hi>)(?=\s+servings\b)", re.IGNORECASE)
+
+
+def mark_meta_amounts(intro_html):
+    """The intro's Servings and Calories values scale along with the amounts,
+    in whole numbers. Calories is treated as the total for what's being
+    made, so it moves in step with the serving count."""
+    intro_html = _META_AMOUNT_RE.sub(lambda m: m["label"] + _amount_span(m, whole=True), intro_html)
+    return _BYLINE_SERVINGS_RE.sub(lambda m: _amount_span(m, whole=True), intro_html)
+
+
 def scaling_base(recipe):
     """The serving count a recipe's amounts are written for ('4-6' counts as
     its low end), or None when the recipe can't scale: no stated servings, or
@@ -2040,7 +2056,7 @@ def render_recipe(slug):
 
     body = (
         f"{photo_html}{uploader_html}"
-        f"<div class='intro-block'>{r['intro_html']}</div>"
+        f"<div class='intro-block'>{mark_meta_amounts(r['intro_html']) if base else r['intro_html']}</div>"
         f"{actions}"
         f"{'<div class=\"section-title\">Ingredients</div>' + servings_html + ''.join(groups_html) if groups_html else ''}"
         f"{''.join(notes_html)}"
