@@ -91,6 +91,115 @@ def render_inline(text):
     return text
 
 
+# Serving-size scaling. The server only marks which numbers are amounts (see
+# mark_amounts); SCALE_SCRIPT does the arithmetic in the browser. Steps are full
+# of numbers that must never scale (15 minutes, 350°F, 2-inch pieces), so outside
+# the start of an ingredient line a number only counts as an amount when a
+# volume/weight unit follows it. Inches and counts deliberately aren't units.
+_NUM_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+_FRACTION_GLYPHS = {
+    "⅛": 0.125, "¼": 0.25, "⅓": 1 / 3, "⅜": 0.375, "½": 0.5,
+    "⅝": 0.625, "⅔": 2 / 3, "¾": 0.75, "⅞": 0.875,
+}
+_GLYPH_CLASS = "[" + "".join(_FRACTION_GLYPHS) + "]"
+_NUM = rf"(?:\d+\s*{_GLYPH_CLASS}|\d+\s+\d+/\d+|\d+/\d+|\d+(?:\.\d+)?|{_GLYPH_CLASS})"
+_NUM_OR_WORD = rf"(?:{_NUM}|\b(?:{'|'.join(_NUM_WORDS)})\b)"
+_UNIT = (
+    r"(?:tablespoons?|tbsps?|tbs|teaspoons?|tsps?|cups?|fl\.?\s*oz|ounces?|oz|pounds?|lbs?"
+    r"|grams?|g|kilograms?|kg|milliliters?|ml|liters?|litres?|l|pints?|quarts?)"
+)
+_UNIT_AMOUNT_RE = re.compile(
+    rf"(?<![\w.,/-])(?P<lo>{_NUM_OR_WORD})(?:(?P<sep>\s*[-–—]\s*|\s+to\s+)(?P<hi>{_NUM_OR_WORD}))?"
+    rf"(?P<gap>\s*)(?P<unit>{_UNIT})\b(?!-)",
+    re.IGNORECASE,
+)
+_LEAD_AMOUNT_RE = re.compile(
+    rf"(?P<space>\s*)(?P<lo>{_NUM})(?:(?P<sep>\s*[-–—]\s*|\s+to\s+)(?P<hi>{_NUM}))?(?![\d°%/])"
+)
+_PLURAL_UNITS = {
+    "cup": "cups", "tablespoon": "tablespoons", "teaspoon": "teaspoons", "pound": "pounds",
+    "ounce": "ounces", "lb": "lbs", "gram": "grams", "liter": "liters", "litre": "litres",
+    "pint": "pints", "quart": "quarts",
+}
+_WHOLE_NUMBER_UNITS = {"g", "gram", "ml", "milliliter"}
+
+
+def _amount_value(text):
+    text = text.strip().lower()
+    if text in _NUM_WORDS:
+        return _NUM_WORDS[text]
+    total = 0.0
+    glyph = text[-1] if text[-1] in _FRACTION_GLYPHS else None
+    if glyph:
+        total += _FRACTION_GLYPHS[glyph]
+        text = text[:-1].strip()
+    for part in text.split():
+        if "/" in part:
+            top, bottom = part.split("/")
+            total += int(top) / int(bottom) if int(bottom) else 0
+        else:
+            total += float(part)
+    return total
+
+
+def _amount_span(m, whole=False):
+    attrs = f" data-lo='{_amount_value(m['lo'])}'"
+    text = m["lo"]
+    if m["hi"]:
+        attrs += f" data-hi='{_amount_value(m['hi'])}' data-sep='{m['sep']}'"
+        text += m["sep"] + m["hi"]
+    if whole:
+        attrs += " data-whole='1'"
+    return f"<span class='amt'{attrs}>{text}</span>"
+
+
+def _unit_amount_html(m):
+    unit = m["unit"]
+    stem = unit.lower().rstrip("s")
+    span = _amount_span(m, whole=stem in _WHOLE_NUMBER_UNITS)
+    if stem in _PLURAL_UNITS:
+        unit = f"<span class='amt-unit' data-one='{stem}' data-many='{_PLURAL_UNITS[stem]}'>{unit}</span>"
+    return f"{span}{m['gap']}{unit}"
+
+
+def mark_amounts(fragment, lead=False):
+    """Wraps each scalable amount in already-rendered HTML in a span for
+    SCALE_SCRIPT. `lead` is for an ingredient line, where a bare count at
+    the very start also scales ('8 raw tiger prawns'); a step only ever
+    scales number + unit. Tags and entities are skipped, so a number inside
+    one (&#x27;) can't be mistaken for an amount."""
+    parts = re.split(r"(<[^>]+>|&#?\w+;)", fragment)
+    for i, part in enumerate(parts):
+        if i % 2 or not part:
+            continue
+        prefix = ""
+        if lead:
+            lead = False
+            m = _LEAD_AMOUNT_RE.match(part)
+            if m and not _UNIT_AMOUNT_RE.match(part, m.end("space")):
+                prefix = m["space"] + _amount_span(m)
+                part = part[m.end():]
+        parts[i] = prefix + _UNIT_AMOUNT_RE.sub(_unit_amount_html, part)
+    return "".join(parts)
+
+
+def scaling_base(recipe):
+    """The serving count a recipe's amounts are written for ('4-6' counts as
+    its low end), or None when the recipe can't scale: no stated servings, or
+    nothing in its ingredient list to scale. The second case is what keeps a
+    per-cup recipe whose real amounts sit inside its steps from scaling."""
+    m = re.search(r"\d+", recipe["meta"]["servings"] or "")
+    if not m or int(m.group()) == 0:
+        return None
+    for _label, items in recipe["ingredient_groups"]:
+        if any("class='amt'" in mark_amounts(render_inline(i), lead=True) for i in items):
+            return int(m.group())
+    return None
+
+
 def parse_md_table(lines):
     """A recipe pasted from some sites lists ingredients as a GFM table
     (| Amount | Ingredient |) instead of a bullet list. Returns a list of
@@ -995,6 +1104,15 @@ header.top a.back:hover { color: var(--text); }
 .btn.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 
 .section-title { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); margin: 1.7rem 0 0.6rem; }
+.servings { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 0.6rem; }
+.servings-label { color: var(--text-dim); font-size: 0.88rem; }
+.servings button {
+  min-width: 2.4rem; height: 2.4rem; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--text); font: inherit; font-weight: 600; cursor: pointer;
+}
+.servings .servings-reset { min-width: 0; height: auto; padding: 0.35rem 0.7rem; font-size: 0.8rem; color: var(--text-dim); }
+.servings output { min-width: 1.6rem; text-align: center; font-weight: 700; font-size: 1.1rem; }
+.scaled .amt, .scaled .amt-unit { color: var(--accent); font-weight: 600; }
 .ing-group h3 { font-size: 1.02rem; color: var(--accent); margin: 1rem 0 0.4rem; font-family: 'Fraunces', Georgia, serif; }
 .ing-group ul { margin: 0; padding-left: 1.3rem; }
 .ing-group li { margin: 0.3rem 0; }
@@ -1420,6 +1538,76 @@ LIST_BUILDER_SCRIPT = (
 )
 
 
+# Shared by the recipe page and cooking mode. The chosen count travels in the
+# URL (?servings=6) from one to the other, so a refresh keeps it too.
+SCALE_SCRIPT = (
+    "<script>"
+    "var AMOUNT_FRACTIONS=[[0,''],[0.125,'⅛'],[0.25,'¼'],[1/3,'⅓'],[0.375,'⅜'],[0.5,'½'],"
+    "[0.625,'⅝'],[2/3,'⅔'],[0.75,'¾'],[0.875,'⅞'],[1,'']];"
+    "function formatAmount(value,whole){"
+    "if(whole||value>=20)return String(Math.max(1,Math.round(value)));"
+    "var n=Math.floor(value),best=AMOUNT_FRACTIONS[0];"
+    "AMOUNT_FRACTIONS.forEach(function(f){"
+    "if(Math.abs(value-n-f[0])<Math.abs(value-n-best[0]))best=f;"
+    "});"
+    "if(best[0]===1){n++;best=AMOUNT_FRACTIONS[0];}"
+    "if(!n&&!best[1])return '⅛';"
+    "return (n||'')+best[1];"
+    "}"
+    "function applyServings(servings,base){"
+    "var factor=servings/base;"
+    "document.body.classList.toggle('scaled',servings!==base);"
+    "document.querySelectorAll('.amt').forEach(function(el){"
+    "if(el.dataset.original===undefined)el.dataset.original=el.textContent;"
+    "var whole=!!el.dataset.whole;"
+    "var lo=parseFloat(el.dataset.lo)*factor;"
+    "var hi=el.dataset.hi?parseFloat(el.dataset.hi)*factor:null;"
+    "el.textContent=servings===base?el.dataset.original:"
+    "formatAmount(lo,whole)+(hi===null?'':el.dataset.sep+formatAmount(hi,whole));"
+    "var unit=el.nextElementSibling;"
+    "if(!unit||!unit.classList.contains('amt-unit'))return;"
+    "if(unit.dataset.original===undefined)unit.dataset.original=unit.textContent;"
+    "unit.textContent=servings===base?unit.dataset.original:"
+    "((hi===null?lo:hi)>1?unit.dataset.many:unit.dataset.one);"
+    "});"
+    "}"
+    "function servingsFromUrl(base){"
+    "var n=parseInt(new URLSearchParams(location.search).get('servings'),10);"
+    "return n>=1&&n<=99?n:base;"
+    "}"
+    "</script>"
+)
+
+SERVINGS_CONTROL_SCRIPT = (
+    "<script>"
+    "(function(){"
+    "var box=document.getElementById('servings');"
+    "if(!box)return;"
+    "var base=parseInt(box.dataset.base,10);"
+    "var countEl=document.getElementById('servingsCount');"
+    "var resetBtn=document.getElementById('servingsReset');"
+    "var cookLink=document.getElementById('cookLink');"
+    "var cookHref=cookLink?cookLink.getAttribute('href'):null;"
+    "function set(n){"
+    "n=Math.max(1,Math.min(99,n));"
+    "box.dataset.current=n;"
+    "countEl.textContent=n;"
+    "resetBtn.hidden=n===base;"
+    "applyServings(n,base);"
+    "var query=n===base?'':'?servings='+n;"
+    "history.replaceState(null,'',location.pathname+query);"
+    "if(cookLink)cookLink.setAttribute('href',cookHref+query);"
+    "}"
+    "function current(){return parseInt(box.dataset.current,10);}"
+    "document.getElementById('servingsDown').addEventListener('click',function(){set(current()-1);});"
+    "document.getElementById('servingsUp').addEventListener('click',function(){set(current()+1);});"
+    "resetBtn.addEventListener('click',function(){set(base);});"
+    "set(servingsFromUrl(base));"
+    "})();"
+    "</script>"
+)
+
+
 def _list_builder_field(name, label, placeholder, add_label, initial_items=(), hint=""):
     initial_value = html.escape("\n".join(initial_items))
     hint_html = f"<span class='hint'>{html.escape(hint)}</span>" if hint else ""
@@ -1806,11 +1994,15 @@ def render_recipe(slug):
     if r is None:
         return None
     slug_q = quote(r["slug"], safe="")
+    base = scaling_base(r)
 
     groups_html = []
     for label, items in r["ingredient_groups"]:
         heading = f"<h3>{html.escape(label)}</h3>" if label else ""
-        items_html = "".join(f"<li>{render_inline(i)}</li>" for i in items)
+        items_html = "".join(
+            f"<li>{mark_amounts(render_inline(i), lead=True) if base else render_inline(i)}</li>"
+            for i in items
+        )
         groups_html.append(f"<div class='ing-group'>{heading}<ul>{items_html}</ul></div>")
 
     notes_html = []
@@ -1818,7 +2010,7 @@ def render_recipe(slug):
         notes_html.append(f"<div class='notes-block'><h3>{html.escape(heading)}</h3>{body}</div>")
 
     cook_btn = (
-        f"<a class='btn primary' href='/recipe/{slug_q}/step/1'>Start Cooking &rarr;</a>"
+        f"<a class='btn primary' id='cookLink' href='/recipe/{slug_q}/step/1'>Start Cooking &rarr;</a>"
         if r["steps"] else ""
     )
 
@@ -1832,6 +2024,17 @@ def render_recipe(slug):
         f"</div>"
     )
 
+    servings_html = (
+        f"<div class='servings' id='servings' data-base='{base}'>"
+        "<span class='servings-label'>Servings</span>"
+        "<button type='button' id='servingsDown' aria-label='Fewer servings'>&minus;</button>"
+        f"<output id='servingsCount'>{base}</output>"
+        "<button type='button' id='servingsUp' aria-label='More servings'>+</button>"
+        "<button type='button' class='servings-reset' id='servingsReset' hidden>Reset</button>"
+        "</div>"
+        if base else ""
+    )
+
     photo_html = _photo_strip_html(r["slug"], list_recipe_photos(r["slug"]))
     uploader_html = _photo_uploader_html(r["slug"])
 
@@ -1839,9 +2042,10 @@ def render_recipe(slug):
         f"{photo_html}{uploader_html}"
         f"<div class='intro-block'>{r['intro_html']}</div>"
         f"{actions}"
-        f"{'<div class=\"section-title\">Ingredients</div>' + ''.join(groups_html) if groups_html else ''}"
+        f"{'<div class=\"section-title\">Ingredients</div>' + servings_html + ''.join(groups_html) if groups_html else ''}"
         f"{''.join(notes_html)}"
         f"{PHOTO_UPLOADER_SCRIPT}"
+        f"{SCALE_SCRIPT + SERVINGS_CONTROL_SCRIPT if base else ''}"
     )
     return page(r["title"], body, back_href="/", back_label="My Kitchen")
 
@@ -1860,10 +2064,12 @@ def render_step(slug, n):
     total = len(r["steps"])
     n = max(1, min(n, total))
     slug_q = quote(r["slug"], safe="")
+    base = scaling_base(r)
 
     def render_card(s):
         label_html = f"<span class='step-label'>{html.escape(s['label'])}</span>" if s["label"] else ""
-        return f"<div class='card'><div class='card-text'>{label_html}{s['html']}</div></div>"
+        step_html = mark_amounts(s["html"]) if base else s["html"]
+        return f"<div class='card'><div class='card-text'>{label_html}{step_html}</div></div>"
 
     cards_html = "".join(render_card(s) for s in r["steps"])
 
@@ -1893,7 +2099,7 @@ def render_step(slug, n):
     body = (
         f"<div class='step-page' id='stepPage'>"
         f"<div class='step-top'>"
-        f"<a class='back' href='/recipe/{slug_q}'>&larr; {html.escape(r['title'])}</a>"
+        f"<a class='back' id='stepBack' href='/recipe/{slug_q}'>&larr; {html.escape(r['title'])}</a>"
         f"<button type='button' class='timer-btn' id='timerBtn' aria-label='Timer'>&#9200;</button>"
         f"</div>"
         f"{timer_panel}"
@@ -1905,11 +2111,19 @@ def render_step(slug, n):
         f"<button type='button' class='step-arrow' id='nextBtn' aria-label='Next step'>"
         f"<span class='glyph'>&rarr;</span><span class='lbl'>Next</span></button>"
         f"</div></div>"
+        f"{SCALE_SCRIPT if base else ''}"
         "<script>"
         "(function(){"
         f"var slug={json.dumps(quote(r['slug'], safe=''))};"
         f"var total={total};"
         f"var idx={n - 1};"
+        f"var base={json.dumps(base)};"
+        "var servings=base?servingsFromUrl(base):null;"
+        "var query=servings!==base?'?servings='+servings:'';"
+        "if(query){"
+        "applyServings(servings,base);"
+        "document.getElementById('stepBack').setAttribute('href','/recipe/'+slug+query);"
+        "}"
         "var track=document.getElementById('deckTrack');"
         "var viewport=document.getElementById('deckViewport');"
         "var progressEl=document.getElementById('stepProgress');"
@@ -1927,18 +2141,18 @@ def render_step(slug, n):
         # entirely and is exact regardless of how many cards there are.
         "track.style.transition=animate?'transform 0.28s ease':'none';"
         "track.style.transform='translateX('+(-idx*viewport.clientWidth)+'px)';"
-        "progressEl.textContent='Step '+(idx+1)+' of '+total;"
+        "progressEl.textContent='Step '+(idx+1)+' of '+total+(query?' · '+servings+' servings':'');"
         "barFill.style.width=Math.round((idx+1)/total*100)+'%';"
         "prevBtn.classList.toggle('disabled', idx===0);"
         "var atEnd=idx===total-1;"
         "nextBtn.classList.toggle('primary', atEnd);"
         "nextGlyph.innerHTML=atEnd?'&#10003;':'&rarr;';"
         "nextLbl.textContent=atEnd?'Done':'Next';"
-        "history.replaceState(null,'','/recipe/'+slug+'/step/'+(idx+1));"
+        "history.replaceState(null,'','/recipe/'+slug+'/step/'+(idx+1)+query);"
         "}"
         "function goNext(){"
         "if(idx<total-1){idx++;render(true);}"
-        "else{window.location='/recipe/'+slug;}"
+        "else{window.location='/recipe/'+slug+query;}"
         "}"
         "function goPrev(){if(idx>0){idx--;render(true);}}"
         "prevBtn.addEventListener('click',goPrev);"
